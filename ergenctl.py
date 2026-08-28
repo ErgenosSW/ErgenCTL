@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""ErgenCTL — read-only diagnostics for ErgenOS."""
+"""ErgenCTL - read-only diagnostics for ErgenOS."""
 
 from __future__ import annotations
 
@@ -218,11 +218,22 @@ def service_check() -> Check:
         return Check("grub-btrfsd", "grub-btrfsd", "unknown", "systemctl is unavailable")
 
     code, output, error = run(
-        ["systemctl", "show", "grub-btrfsd.service", "--property=LoadState,ActiveState", "--value"]
+        [
+            "systemctl",
+            "show",
+            "grub-btrfsd.service",
+            "--property=LoadState",
+            "--property=ActiveState",
+        ]
     )
-    states = output.splitlines()
-    loaded = len(states) > 0 and states[0] == "loaded"
-    active = len(states) > 1 and states[1] == "active"
+    states: dict[str, str] = {}
+    for line in output.splitlines():
+        key, separator, value = line.partition("=")
+        if separator:
+            states[key.strip()] = value.strip()
+
+    loaded = states.get("LoadState") == "loaded"
+    active = states.get("ActiveState") == "active"
     if code == 0 and loaded and active:
         return Check("grub-btrfsd", "grub-btrfsd", "pass", "active")
     return Check("grub-btrfsd", "grub-btrfsd", "warning", "not active", error or output or None)
