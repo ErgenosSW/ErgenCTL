@@ -7,6 +7,7 @@ import io
 from pathlib import Path
 import shutil
 import sys
+import tempfile
 import unittest
 from unittest.mock import patch
 
@@ -128,6 +129,12 @@ class SnapshotTests(unittest.TestCase):
 
         self.assertEqual(result.status, "pass")
         self.assertEqual(result.summary, "3 found")
+
+    def test_snapshot_tools_are_skipped_on_non_btrfs_root(self) -> None:
+        self.assertEqual(ergenctl.snapper_check("ext4").status, "skipped")
+        self.assertEqual(ergenctl.snapshot_count_check(root_fstype="ext4").status, "skipped")
+        self.assertEqual(ergenctl.service_check("ext4").status, "skipped")
+        self.assertEqual(ergenctl.pacman_hooks_check("ext4").status, "skipped")
 
 
 class SnapshotReportTests(unittest.TestCase):
@@ -303,6 +310,20 @@ class ResumeTests(unittest.TestCase):
         )
         self.assertIsNone(ergenctl.resume_parameter_from_cmdline("quiet noresume"))
 
+    def test_hibernation_without_hook_or_parameter_is_not_reported_as_broken(self) -> None:
+        with (
+            patch.object(ergenctl, "read_cmdline", return_value="quiet"),
+            patch.object(ergenctl, "resume_hook_configured", return_value=False),
+            patch.object(ergenctl, "snapshot_boot_detected", return_value=(False, "normal root")),
+            patch.object(ergenctl, "collect_boot_log", return_value=(self.empty_resume_log(), False)),
+        ):
+            report = ergenctl.collect_resume_report()
+
+        statuses = {check.id: check.status for check in report.checks}
+        self.assertFalse(report.hibernation_configured)
+        self.assertEqual(statuses["resume-parameter"], "skipped")
+        self.assertEqual(statuses["resume-device"], "skipped")
+
     def test_normal_boot_with_active_resume_device_passes(self) -> None:
         with (
             patch.object(ergenctl, "read_cmdline", return_value="quiet resume=UUID=abc"),
@@ -342,6 +363,289 @@ class ResumeTests(unittest.TestCase):
 
         device = next(check for check in report.checks if check.id == "resume-device")
         self.assertEqual(device.status, "fail")
+
+
+class RepairTests(unittest.TestCase):
+    def test_all_repair_uses_safe_order(self) -> None:
+        steps = ergenctl.selected_repair_steps("all")
+
+        self.assertEqual(
+            [step.id for step in steps],
+            ["repositories", "pacman-hooks", "services", "resume", "grub-snapshots"],
+        )
+        self.assertEqual(steps[-1].commands, (("/etc/grub.d/41_snapshots-btrfs",),))
+
+    def test_preflight_allows_repair_of_mounted_base_system(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "etc").mkdir()
+            (root / "etc/os-release").write_text("ID=ergenos\n")
+            environment = ergenctl.RepairEnvironment(root=root, recovery=True)
+            with (
+                patch.object(ergenctl, "live_environment_detected", return_value=False),
+                patch.object(ergenctl.os, "geteuid", return_value=0),
+            ):
+                error = ergenctl.repair_preflight(ergenctl.selected_repair_steps("repositories"), True, environment)
+
+        self.assertIsNone(error)
+
+    def test_recovery_commands_run_inside_base_system(self) -> None:
+        environment = ergenctl.RepairEnvironment(root=Path("/run/ergenctl/target"), recovery=True)
+
+        command = ergenctl.command_for_environment(("/usr/bin/mkinitcpio", "-P"), environment)
+
+        self.assertEqual(
+            command,
+            ["/usr/bin/arch-chroot", "/run/ergenctl/target", "/usr/bin/mkinitcpio", "-P"],
+        )
+
+    def test_recovery_service_is_enabled_without_starting_snapshot_session(self) -> None:
+        environment = ergenctl.RepairEnvironment(root=Path("/run/ergenctl/target"), recovery=True)
+
+        command = ergenctl.command_for_environment(
+            ("/usr/bin/systemctl", "enable", "--now", "grub-btrfsd.service"),
+            environment,
+        )
+
+        self.assertEqual(
+            command,
+            ["/usr/bin/systemctl", "--root", "/run/ergenctl/target", "enable", "grub-btrfsd.service"],
+        )
+
+    def test_base_subvolume_is_read_from_fstab(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            fstab = Path(directory) / "fstab"
+            fstab.write_text("UUID=root / btrfs defaults,subvol=@ 0 0\n")
+
+            subvolume = ergenctl.configured_root_subvolume(fstab)
+
+        self.assertEqual(subvolume, "@")
+
+    def test_cleanup_never_removes_a_still_mounted_system(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            mount_directory = Path(directory) / "target"
+            mount_directory.mkdir()
+            environment = ergenctl.RepairEnvironment(
+                root=mount_directory,
+                recovery=True,
+                mount_directory=mount_directory,
+                mounted_paths=[mount_directory],
+            )
+            with patch.object(ergenctl, "run_repair_command", return_value=(1, "", "busy")):
+                error = ergenctl.cleanup_repair_environment(environment)
+
+            self.assertEqual(error, "busy")
+            self.assertTrue(mount_directory.is_dir())
+
+    def test_existing_boot_mount_is_detected(self) -> None:
+        with patch.object(ergenctl, "run", return_value=(0, "/boot /dev/vda2", "")):
+            source = ergenctl.existing_mount_source("/boot")
+
+        self.assertEqual(source, "/dev/vda2")
+
+    def test_parent_mount_is_not_treated_as_existing_boot_mount(self) -> None:
+        with patch.object(ergenctl, "run", return_value=(0, "/ rootfs", "")):
+            source = ergenctl.existing_mount_source("/boot")
+
+        self.assertIsNone(source)
+
+    def test_read_only_recovery_bind_uses_bind_mount(self) -> None:
+        with patch.object(ergenctl, "run_repair_command", return_value=(0, "", "")) as run_mock:
+            error = ergenctl.mount_recovery_bind("/boot", Path("/run/ergenctl/target/boot"), True)
+
+        self.assertIsNone(error)
+        self.assertEqual(
+            run_mock.call_args.args[0],
+            ["/usr/bin/mount", "-o", "bind,ro", "/boot", "/run/ergenctl/target/boot"],
+        )
+
+    def test_recovery_safety_snapshot_uses_btrfs_directly(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / ".snapshots").mkdir()
+            environment = ergenctl.RepairEnvironment(root=root, recovery=True)
+            with patch.object(ergenctl, "run_repair_command", return_value=(0, "", "")) as run_mock:
+                snapshot, error, command = ergenctl.create_safety_snapshot("all", environment)
+
+        self.assertIsNone(error)
+        self.assertTrue(snapshot.startswith("/.snapshots/ergenctl-safety-"))
+        self.assertEqual(command[:4], ["/usr/bin/btrfs", "subvolume", "snapshot", "-r"])
+        self.assertEqual(run_mock.call_args.args[0], command)
+
+    def test_preflight_blocks_btrfs_repair_on_ext4(self) -> None:
+        with (
+            patch.object(ergenctl, "read_os_release", return_value={"ID": "ergenos"}),
+            patch.object(ergenctl, "live_environment_detected", return_value=False),
+            patch.object(ergenctl, "snapshot_boot_detected", return_value=(False, "normal")),
+            patch.object(ergenctl, "root_filesystem_type", return_value="ext4"),
+        ):
+            error = ergenctl.repair_preflight(ergenctl.selected_repair_steps("services"), True)
+
+        self.assertIn("requires Btrfs", error)
+
+    def test_all_repair_executes_only_needed_steps(self) -> None:
+        needed = [ergenctl.REPAIR_STEPS["repositories"], ergenctl.REPAIR_STEPS["resume"]]
+        with (
+            patch.object(ergenctl, "needed_repair_steps", return_value=needed),
+            patch.object(ergenctl, "repair_preflight", return_value=None),
+        ):
+            report = ergenctl.execute_repair("all", dry_run=True, create_snapshot=True)
+
+        self.assertEqual(
+            report.steps,
+            ["Enable required Pacman repositories", "Rebuild hibernation resume configuration"],
+        )
+
+    def test_dry_run_does_not_execute_commands(self) -> None:
+        with (
+            patch.object(ergenctl, "repair_preflight", return_value=None),
+            patch.object(ergenctl, "run_repair_command") as run_mock,
+            patch.object(ergenctl, "run_internal_repair") as action_mock,
+            patch.object(ergenctl, "backup_configuration") as backup_mock,
+        ):
+            report = ergenctl.execute_repair("services", dry_run=True, create_snapshot=True)
+
+        self.assertTrue(report.success)
+        self.assertTrue(report.dry_run)
+        self.assertEqual(len(report.executed_commands), 2)
+        run_mock.assert_not_called()
+        action_mock.assert_not_called()
+        backup_mock.assert_not_called()
+
+    def test_internal_action_is_shown_but_not_run_in_dry_run(self) -> None:
+        with (
+            patch.object(ergenctl, "repair_preflight", return_value=None),
+            patch.object(ergenctl, "run_internal_repair") as action_mock,
+        ):
+            report = ergenctl.execute_repair("repositories", dry_run=True, create_snapshot=False)
+
+        self.assertEqual(report.executed_actions, ["enable-multilib"])
+        action_mock.assert_not_called()
+
+    def test_repair_stops_after_internal_action_failure(self) -> None:
+        with (
+            patch.object(ergenctl, "repair_preflight", return_value=None),
+            patch.object(ergenctl, "backup_configuration", return_value=None),
+            patch.object(ergenctl, "run_internal_repair", return_value=(False, "bad config")),
+            patch.object(ergenctl, "run_repair_command") as command_mock,
+        ):
+            report = ergenctl.execute_repair("resume", dry_run=False, create_snapshot=False)
+
+        self.assertFalse(report.success)
+        self.assertEqual(report.executed_actions, ["configure-resume"])
+        self.assertIn("bad config", report.message)
+        command_mock.assert_not_called()
+
+    def test_successful_repair_is_validated(self) -> None:
+        validation = ergenctl.Check("services", "Services", "pass", "active")
+        with (
+            patch.object(ergenctl, "repair_preflight", return_value=None),
+            patch.object(ergenctl, "backup_configuration", return_value="/backup"),
+            patch.object(ergenctl, "run_repair_command", return_value=(0, "", "")) as run_mock,
+            patch.object(ergenctl, "validate_repair_step", return_value=validation),
+        ):
+            report = ergenctl.execute_repair("services", dry_run=False, create_snapshot=False)
+
+        self.assertTrue(report.success)
+        self.assertEqual(run_mock.call_count, 2)
+        self.assertEqual(report.backup_directory, "/backup")
+
+    def test_repair_stops_after_command_failure(self) -> None:
+        with (
+            patch.object(ergenctl, "repair_preflight", return_value=None),
+            patch.object(ergenctl, "backup_configuration", return_value=None),
+            patch.object(ergenctl, "run_repair_command", return_value=(1, "", "failed")) as run_mock,
+        ):
+            report = ergenctl.execute_repair("services", dry_run=False, create_snapshot=False)
+
+        self.assertFalse(report.success)
+        self.assertEqual(run_mock.call_count, 1)
+        self.assertIn("failed", report.message)
+
+    def test_services_validation_checks_daemon_and_cleanup_timer(self) -> None:
+        with patch.object(ergenctl, "run", return_value=(0, "", "")) as run_mock:
+            result = ergenctl.validate_repair_step(ergenctl.REPAIR_STEPS["services"])
+
+        self.assertEqual(result.status, "pass")
+        self.assertEqual(run_mock.call_count, 4)
+
+    def test_enable_multilib_uncomments_repository(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            config = Path(directory) / "pacman.conf"
+            config.write_text("[core]\nInclude = /etc/pacman.d/mirrorlist\n\n#[multilib]\n#Include = /etc/pacman.d/mirrorlist\n")
+
+            success, message = ergenctl.enable_multilib(config)
+
+            self.assertTrue(success)
+            self.assertEqual(message, "multilib enabled")
+            self.assertIn("[multilib]\nInclude = /etc/pacman.d/mirrorlist", config.read_text())
+
+    def test_configure_resume_replaces_stale_uuid(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            mkinitcpio = root / "mkinitcpio.conf"
+            grub = root / "grub"
+            fstab = root / "fstab"
+            mkinitcpio.write_text("HOOKS=(base udev resume filesystems)\n")
+            grub.write_text('GRUB_CMDLINE_LINUX_DEFAULT="quiet resume=UUID=old"\n')
+            fstab.write_text("UUID=new none swap defaults 0 0\n")
+
+            success, message = ergenctl.configure_resume(mkinitcpio, grub, fstab)
+
+            self.assertTrue(success)
+            self.assertIn("UUID=new", message)
+            self.assertEqual(grub.read_text(), 'GRUB_CMDLINE_LINUX_DEFAULT="quiet resume=UUID=new"\n')
+
+    def test_configure_resume_skips_system_without_resume_hook(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            mkinitcpio = root / "mkinitcpio.conf"
+            grub = root / "grub"
+            fstab = root / "fstab"
+            mkinitcpio.write_text("HOOKS=(base udev filesystems)\n")
+            grub.write_text('GRUB_CMDLINE_LINUX_DEFAULT="quiet"\n')
+
+            success, message = ergenctl.configure_resume(mkinitcpio, grub, fstab)
+
+            self.assertTrue(success)
+            self.assertIn("no change", message)
+            self.assertEqual(grub.read_text(), 'GRUB_CMDLINE_LINUX_DEFAULT="quiet"\n')
+
+
+class RollbackTests(unittest.TestCase):
+    def test_rollback_is_blocked_during_normal_boot(self) -> None:
+        with patch.object(ergenctl, "snapshot_boot_detected", return_value=(False, "normal")):
+            report = ergenctl.execute_rollback(4, dry_run=True)
+
+        self.assertFalse(report.success)
+        self.assertIn("only while booted from a snapshot", report.message)
+
+    def test_rollback_dry_run_selects_snapper_snapshot_and_preserves_old_root(self) -> None:
+        environment = ergenctl.RepairEnvironment(
+            root=Path("/run/ergenctl/top-test"),
+            recovery=True,
+            mount_directory=Path("/run/ergenctl/top-test"),
+        )
+        with (
+            patch.object(ergenctl, "snapshot_boot_detected", return_value=(True, "overlay")),
+            patch.object(ergenctl, "live_environment_detected", return_value=False),
+            patch.object(ergenctl.os, "geteuid", return_value=0),
+            patch.object(ergenctl, "configured_root_subvolume", return_value="@"),
+            patch.object(ergenctl, "configured_subvolume", return_value="@snapshots"),
+            patch.object(ergenctl, "prepare_top_level_environment", return_value=(environment, None)),
+            patch.object(ergenctl, "is_btrfs_subvolume", return_value=True),
+            patch.object(ergenctl, "cleanup_repair_environment", return_value=None) as cleanup_mock,
+            patch.object(ergenctl, "run_repair_command") as command_mock,
+        ):
+            report = ergenctl.execute_rollback(4, dry_run=True)
+
+        self.assertTrue(report.success)
+        self.assertEqual(report.source_subvolume, "@snapshots/4/snapshot")
+        self.assertEqual(report.replaced_subvolume, "@")
+        self.assertTrue(report.preserved_subvolume.startswith("@-broken-"))
+        self.assertEqual(report.commands[0][:4], ["/usr/bin/btrfs", "subvolume", "snapshot", "/run/ergenctl/top-test/@snapshots/4/snapshot"])
+        cleanup_mock.assert_called_once_with(environment)
+        command_mock.assert_not_called()
 
 
 class ServiceCheckTests(unittest.TestCase):
@@ -449,6 +753,7 @@ class MainExitCodeTests(unittest.TestCase):
     def test_resume_returns_failure_for_failed_check(self) -> None:
         report = ergenctl.ResumeReport(
             boot_mode="normal",
+            hibernation_configured=True,
             noresume=False,
             resume_parameter="UUID=missing",
             checks=[ergenctl.Check("resume-device", "Resume device", "fail", "missing")],
@@ -460,6 +765,17 @@ class MainExitCodeTests(unittest.TestCase):
             exit_code = ergenctl.main(["resume"])
 
         self.assertEqual(exit_code, 1)
+
+    def test_fix_can_be_cancelled_before_execution(self) -> None:
+        with (
+            patch.object(ergenctl, "confirm_repair", return_value=False),
+            patch.object(ergenctl, "execute_repair") as execute_mock,
+            patch("sys.stdout", new_callable=io.StringIO),
+        ):
+            exit_code = ergenctl.main(["fix", "services"])
+
+        self.assertEqual(exit_code, 2)
+        execute_mock.assert_not_called()
 
 
 if __name__ == "__main__":
