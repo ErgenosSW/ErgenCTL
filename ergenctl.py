@@ -50,6 +50,14 @@ class BootLogReport:
     message: str | None = None
 
 
+@dataclass(frozen=True)
+class ResumeReport:
+    boot_mode: str
+    noresume: bool
+    resume_parameter: str | None
+    checks: list[Check]
+
+
 LOG_CATEGORY_PATTERNS = {
     "resume": (r"\bresume\b", r"\bhibernat", r"\bsuspend", r"\bswap(?:file|space)?\b"),
     "boot": ("kernel", "systemd", "boot", "mount", "initramfs", "grub"),
@@ -88,6 +96,43 @@ def read_cmdline() -> str:
         return Path("/proc/cmdline").read_text(encoding="utf-8").strip()
     except OSError:
         return ""
+
+
+def resume_parameter_from_cmdline(cmdline: str) -> str | None:
+    for parameter in cmdline.split():
+        if parameter.startswith("resume="):
+            value = parameter.partition("=")[2]
+            return value or None
+    return None
+
+
+def resolve_resume_device(parameter: str) -> str | None:
+    prefixes = {"UUID": "/dev/disk/by-uuid", "PARTUUID": "/dev/disk/by-partuuid"}
+    kind, separator, value = parameter.partition("=")
+    candidate = Path(prefixes[kind]) / value if separator and kind in prefixes else Path(parameter)
+    try:
+        return str(candidate.resolve(strict=True))
+    except OSError:
+        return None
+
+
+def active_swap_devices() -> set[str]:
+    try:
+        lines = Path("/proc/swaps").read_text(encoding="utf-8").splitlines()[1:]
+    except OSError:
+        return set()
+
+    devices: set[str] = set()
+    for line in lines:
+        fields = line.split()
+        if not fields:
+            continue
+        device = fields[0].replace("\\040", " ")
+        try:
+            devices.add(str(Path(device).resolve(strict=True)))
+        except OSError:
+            devices.add(device)
+    return devices
 
 
 def run(command: Sequence[str]) -> tuple[int, str, str]:
@@ -591,6 +636,67 @@ def group_log_entries(entries: list[str]) -> list[dict[str, object]]:
     ]
 
 
+def collect_resume_report() -> ResumeReport:
+    cmdline = read_cmdline()
+    snapshot_boot, boot_evidence = snapshot_boot_detected()
+    boot_mode = "snapshot" if snapshot_boot else "normal"
+    noresume = "noresume" in cmdline.split()
+    resume_parameter = resume_parameter_from_cmdline(cmdline)
+    checks: list[Check] = []
+
+    if snapshot_boot and noresume:
+        checks.append(Check("resume-policy", "Resume policy", "pass", "disabled for snapshot boot", boot_evidence))
+    elif snapshot_boot:
+        checks.append(
+            Check("resume-policy", "Resume policy", "warning", "noresume is missing for snapshot boot", boot_evidence)
+        )
+    elif noresume:
+        checks.append(Check("resume-policy", "Resume policy", "warning", "disabled during normal boot", "noresume"))
+    else:
+        checks.append(Check("resume-policy", "Resume policy", "pass", "enabled for normal boot"))
+
+    if resume_parameter:
+        parameter_status = "skipped" if noresume else "pass"
+        parameter_summary = "ignored because noresume is active" if noresume else resume_parameter
+        checks.append(Check("resume-parameter", "Resume parameter", parameter_status, parameter_summary, resume_parameter))
+    else:
+        status = "skipped" if noresume else "warning"
+        summary = "not required while noresume is active" if noresume else "missing from kernel command line"
+        checks.append(Check("resume-parameter", "Resume parameter", status, summary))
+
+    if noresume:
+        checks.append(Check("resume-device", "Resume device", "skipped", "not checked while noresume is active"))
+    elif not resume_parameter:
+        checks.append(Check("resume-device", "Resume device", "warning", "cannot check without resume parameter"))
+    else:
+        resolved = resolve_resume_device(resume_parameter)
+        swaps = active_swap_devices()
+        if resolved is None:
+            checks.append(Check("resume-device", "Resume device", "fail", "configured device was not found", resume_parameter))
+        elif resolved not in swaps:
+            checks.append(Check("resume-device", "Resume device", "warning", "configured device is not active swap", resolved))
+        else:
+            checks.append(Check("resume-device", "Resume device", "pass", "configured device is active", resolved))
+
+    log_report, log_failed = collect_boot_log(priority="warning", lines=200, category="resume")
+    if log_failed:
+        checks.append(Check("resume-log", "Resume log", "unknown", log_report.message or "could not read journal"))
+    elif log_report.groups:
+        checks.append(
+            Check(
+                "resume-log",
+                "Resume log",
+                "warning",
+                f"{len(log_report.entries)} relevant message(s)",
+                "; ".join(str(group["message"]) for group in log_report.groups[:3]),
+            )
+        )
+    else:
+        checks.append(Check("resume-log", "Resume log", "pass", "no warnings found"))
+
+    return ResumeReport(boot_mode, noresume, resume_parameter, checks)
+
+
 def status_payload(checks: list[Check]) -> dict[str, object]:
     return {
         "schema_version": SCHEMA_VERSION,
@@ -618,6 +724,16 @@ def boot_log_payload(report: BootLogReport) -> dict[str, object]:
         "version": VERSION,
         "hostname": platform.node(),
         "boot_log": asdict(report),
+    }
+
+
+def resume_payload(report: ResumeReport) -> dict[str, object]:
+    return {
+        "schema_version": SCHEMA_VERSION,
+        "application": APP_NAME,
+        "version": VERSION,
+        "hostname": platform.node(),
+        "resume_report": asdict(report),
     }
 
 
@@ -698,6 +814,24 @@ def print_boot_log(report: BootLogReport, raw: bool = False) -> None:
         print(report.message)
 
 
+def print_resume(report: ResumeReport) -> None:
+    print_header("Resume diagnostics")
+    print(f"Boot mode  {report.boot_mode}")
+    print(f"noresume   {'yes' if report.noresume else 'no'}")
+    print(f"Resume     {report.resume_parameter or 'not configured'}\n")
+    title_width = max((len(check.title) for check in report.checks), default=0)
+    for check in report.checks:
+        label = f"[{STATUS_LABELS.get(check.status, '?'):4}]"
+        label = colorize(label, STATUS_COLORS.get(check.status, "0"))
+        print(f"{label} {check.title:<{title_width}}  {check.summary}")
+
+    details = [check for check in report.checks if check.status in {"warning", "fail", "unknown"} and check.evidence]
+    if details:
+        print("\nDetails:")
+        for check in details:
+            print(f"- {check.title}: {check.evidence}")
+
+
 def positive_int(value: str) -> int:
     number = int(value)
     if number < 1:
@@ -732,6 +866,8 @@ def build_parser() -> argparse.ArgumentParser:
     )
     logs.add_argument("--raw", action="store_true", help="show complete journal entries without grouping")
     logs.add_argument("--json", action="store_true", dest="as_json", help="emit machine-readable JSON")
+    resume = subparsers.add_parser("resume", help="inspect hibernation resume configuration")
+    resume.add_argument("--json", action="store_true", dest="as_json", help="emit machine-readable JSON")
     return parser
 
 
@@ -765,6 +901,13 @@ def main(argv: Sequence[str] | None = None) -> int:
         else:
             print_boot_log(report, args.raw)
         return 1 if failed else 0
+    if args.command == "resume":
+        report = collect_resume_report()
+        if args.as_json:
+            print(json.dumps(resume_payload(report), indent=2, ensure_ascii=False))
+        else:
+            print_resume(report)
+        return 1 if any(check.status == "fail" for check in report.checks) else 0
     return 1
 
 

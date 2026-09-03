@@ -292,6 +292,58 @@ class BootLogTests(unittest.TestCase):
         self.assertIn("sudo", report.message)
 
 
+class ResumeTests(unittest.TestCase):
+    def empty_resume_log(self) -> ergenctl.BootLogReport:
+        return ergenctl.BootLogReport("current", "warning", "resume", True, [], [], "No errors found")
+
+    def test_resume_parameter_is_read_from_kernel_command_line(self) -> None:
+        self.assertEqual(
+            ergenctl.resume_parameter_from_cmdline("quiet resume=UUID=abc root=/dev/sda2"),
+            "UUID=abc",
+        )
+        self.assertIsNone(ergenctl.resume_parameter_from_cmdline("quiet noresume"))
+
+    def test_normal_boot_with_active_resume_device_passes(self) -> None:
+        with (
+            patch.object(ergenctl, "read_cmdline", return_value="quiet resume=UUID=abc"),
+            patch.object(ergenctl, "snapshot_boot_detected", return_value=(False, "normal root")),
+            patch.object(ergenctl, "resolve_resume_device", return_value="/dev/sda2"),
+            patch.object(ergenctl, "active_swap_devices", return_value={"/dev/sda2"}),
+            patch.object(ergenctl, "collect_boot_log", return_value=(self.empty_resume_log(), False)),
+        ):
+            report = ergenctl.collect_resume_report()
+
+        self.assertEqual(report.boot_mode, "normal")
+        self.assertFalse(report.noresume)
+        self.assertTrue(all(check.status == "pass" for check in report.checks))
+
+    def test_snapshot_boot_with_noresume_skips_device(self) -> None:
+        with (
+            patch.object(ergenctl, "read_cmdline", return_value="resume=UUID=abc noresume"),
+            patch.object(ergenctl, "snapshot_boot_detected", return_value=(True, "overlay root")),
+            patch.object(ergenctl, "collect_boot_log", return_value=(self.empty_resume_log(), False)),
+        ):
+            report = ergenctl.collect_resume_report()
+
+        statuses = {check.id: check.status for check in report.checks}
+        self.assertEqual(statuses["resume-policy"], "pass")
+        self.assertEqual(statuses["resume-parameter"], "skipped")
+        self.assertEqual(statuses["resume-device"], "skipped")
+
+    def test_missing_resume_device_fails(self) -> None:
+        with (
+            patch.object(ergenctl, "read_cmdline", return_value="resume=UUID=missing"),
+            patch.object(ergenctl, "snapshot_boot_detected", return_value=(False, "normal root")),
+            patch.object(ergenctl, "resolve_resume_device", return_value=None),
+            patch.object(ergenctl, "active_swap_devices", return_value=set()),
+            patch.object(ergenctl, "collect_boot_log", return_value=(self.empty_resume_log(), False)),
+        ):
+            report = ergenctl.collect_resume_report()
+
+        device = next(check for check in report.checks if check.id == "resume-device")
+        self.assertEqual(device.status, "fail")
+
+
 class ServiceCheckTests(unittest.TestCase):
     def test_service_state_does_not_depend_on_property_order(self) -> None:
         output = "ActiveState=active\nLoadState=loaded\n"
@@ -393,6 +445,21 @@ class MainExitCodeTests(unittest.TestCase):
             ergenctl.main(["logs", "--lines", "0"])
 
         self.assertEqual(raised.exception.code, 2)
+
+    def test_resume_returns_failure_for_failed_check(self) -> None:
+        report = ergenctl.ResumeReport(
+            boot_mode="normal",
+            noresume=False,
+            resume_parameter="UUID=missing",
+            checks=[ergenctl.Check("resume-device", "Resume device", "fail", "missing")],
+        )
+        with (
+            patch.object(ergenctl, "collect_resume_report", return_value=report),
+            patch("sys.stdout", new_callable=io.StringIO),
+        ):
+            exit_code = ergenctl.main(["resume"])
+
+        self.assertEqual(exit_code, 1)
 
 
 if __name__ == "__main__":
