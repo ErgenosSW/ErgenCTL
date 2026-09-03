@@ -5,9 +5,12 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import platform
+import re
 import shutil
 import subprocess
+import sys
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Sequence
@@ -25,6 +28,66 @@ class Check:
     status: str
     summary: str
     evidence: str | None = None
+
+
+@dataclass(frozen=True)
+class SnapshotReport:
+    boot_mode: str
+    current_snapshot: int | None
+    available: bool
+    listing: str | None
+    message: str | None = None
+
+
+@dataclass(frozen=True)
+class BootLogReport:
+    boot: str
+    priority: str
+    category: str
+    available: bool
+    entries: list[str]
+    groups: list[dict[str, object]]
+    message: str | None = None
+
+
+LOG_CATEGORY_PATTERNS = {
+    "resume": (r"\bresume\b", r"\bhibernat", r"\bsuspend", r"\bswap(?:file|space)?\b"),
+    "boot": ("kernel", "systemd", "boot", "mount", "initramfs", "grub"),
+    "audio": ("pipewire", "wireplumber", "pulse", "rtkit", "sink", "audio"),
+    "graphics": ("vulkan", "gpu", "drm", "kms", "mutter", "gnome-shell", "nvidia", "nouveau", "amdgpu"),
+}
+
+RESUME_SOURCES = (
+    "kernel",
+    "systemd",
+    "systemd-hibernate-resume",
+    "systemd-sleep",
+    "dracut",
+    "mkinitcpio",
+)
+
+STATUS_LABELS = {
+    "pass": "OK",
+    "warning": "WARN",
+    "fail": "FAIL",
+    "skipped": "SKIP",
+    "unknown": "?",
+}
+
+STATUS_COLORS = {
+    "pass": "32",
+    "warning": "33",
+    "fail": "31",
+    "skipped": "36",
+    "unknown": "35",
+}
+
+
+def read_cmdline() -> str:
+    try:
+        return Path("/proc/cmdline").read_text(encoding="utf-8").strip()
+    except OSError:
+        return ""
 
 
 def run(command: Sequence[str]) -> tuple[int, str, str]:
@@ -93,10 +156,7 @@ def snapshot_boot_detected() -> tuple[bool, str]:
     """Detect a grub-btrfs snapshot boot without changing system state."""
     code, output, _ = run(["findmnt", "--noheadings", "--output", "FSTYPE", "/"])
     fstype = output.splitlines()[0].strip() if code == 0 and output else "unknown"
-    try:
-        cmdline = Path("/proc/cmdline").read_text(encoding="utf-8").strip()
-    except OSError:
-        cmdline = ""
+    cmdline = read_cmdline()
 
     snapshot_subvolume = "@snapshots/" in cmdline and "/snapshot" in cmdline
     snapshot_boot = fstype == "overlay" or snapshot_subvolume
@@ -104,8 +164,8 @@ def snapshot_boot_detected() -> tuple[bool, str]:
     return snapshot_boot, evidence
 
 
-def boot_mode_check() -> Check:
-    snapshot_boot, evidence = snapshot_boot_detected()
+def boot_mode_check(detection: tuple[bool, str] | None = None) -> Check:
+    snapshot_boot, evidence = detection if detection is not None else snapshot_boot_detected()
     if "root_fstype=unknown" in evidence:
         return Check("boot-mode", "Boot mode", "unknown", "Could not determine boot mode", evidence)
     return Check(
@@ -117,8 +177,8 @@ def boot_mode_check() -> Check:
     )
 
 
-def disk_space_check() -> Check:
-    snapshot_boot, evidence = snapshot_boot_detected()
+def disk_space_check(detection: tuple[bool, str] | None = None) -> Check:
+    snapshot_boot, evidence = detection if detection is not None else snapshot_boot_detected()
     if snapshot_boot:
         return Check(
             "disk-space",
@@ -175,11 +235,11 @@ def snapper_check() -> Check:
     )
 
 
-def snapshot_count_check() -> Check:
+def snapshot_count_check(detection: tuple[bool, str] | None = None) -> Check:
     if not shutil.which("snapper"):
         return Check("snapshots", "Snapshots", "skipped", "snapper is not installed")
 
-    snapshot_boot, evidence = snapshot_boot_detected()
+    snapshot_boot, evidence = detection if detection is not None else snapshot_boot_detected()
     if snapshot_boot:
         return Check(
             "snapshots",
@@ -240,10 +300,7 @@ def service_check() -> Check:
 
 
 def live_environment_detected() -> bool:
-    try:
-        cmdline = Path("/proc/cmdline").read_text(encoding="utf-8")
-    except OSError:
-        cmdline = ""
+    cmdline = read_cmdline()
     return Path("/run/archiso/bootmnt").exists() or "archisobasedir=" in cmdline
 
 
@@ -363,15 +420,16 @@ def failed_units_check() -> Check:
 
 
 def collect_checks() -> list[Check]:
+    snapshot_detection = snapshot_boot_detected()
     return [
         distribution_check(),
         Check("kernel", "Kernel", "pass", platform.release()),
         firmware_check(),
         root_check(),
-        boot_mode_check(),
-        disk_space_check(),
+        boot_mode_check(snapshot_detection),
+        disk_space_check(snapshot_detection),
         snapper_check(),
-        snapshot_count_check(),
+        snapshot_count_check(snapshot_detection),
         service_check(),
     ]
 
@@ -387,6 +445,152 @@ def collect_doctor_checks() -> list[Check]:
     ]
 
 
+def snapshot_number_from_cmdline(cmdline: str) -> int | None:
+    match = re.search(r"@snapshots/(\d+)/snapshot", cmdline)
+    return int(match.group(1)) if match else None
+
+
+def collect_snapshot_report() -> tuple[SnapshotReport, bool]:
+    cmdline = read_cmdline()
+    current_snapshot = snapshot_number_from_cmdline(cmdline)
+    snapshot_boot, _ = snapshot_boot_detected()
+    if snapshot_boot:
+        return SnapshotReport(
+            boot_mode="snapshot",
+            current_snapshot=current_snapshot,
+            available=False,
+            listing=None,
+            message="Snapshot listing is unavailable while booted from snapshot overlay",
+        ), False
+
+    if not shutil.which("snapper"):
+        return SnapshotReport(
+            boot_mode="normal",
+            current_snapshot=current_snapshot,
+            available=False,
+            listing=None,
+            message="snapper is not installed",
+        ), True
+
+    code, output, error = run(["snapper", "-c", "root", "list"])
+    if code == 0:
+        return SnapshotReport(
+            boot_mode="normal",
+            current_snapshot=current_snapshot,
+            available=True,
+            listing=output or None,
+            message=None if output else "No snapshots found",
+        ), False
+
+    diagnostic = "\n".join(part for part in (output, error) if part)
+    lowered = diagnostic.lower()
+    if "no permissions" in lowered or "permission denied" in lowered:
+        message = "Insufficient permissions. Run this command with sudo."
+    else:
+        message = f"Could not list snapshots: {diagnostic}" if diagnostic else "Could not list snapshots"
+    return SnapshotReport("normal", current_snapshot, False, None, message), True
+
+
+def collect_boot_log(
+    previous: bool = False,
+    priority: str = "error",
+    lines: int = 100,
+    category: str = "all",
+) -> tuple[BootLogReport, bool]:
+    boot = "previous" if previous else "current"
+    if not shutil.which("journalctl"):
+        return BootLogReport(boot, priority, category, False, [], [], "journalctl is not available"), True
+
+    boot_id = "-1" if previous else "0"
+    journal_priority = "warning..alert" if priority == "warning" else "err..alert"
+    query_lines = lines if category == "all" else min(max(lines * 10, 500), 5000)
+    code, output, error = run(
+        [
+            "journalctl",
+            "--boot",
+            boot_id,
+            "--priority",
+            journal_priority,
+            "--lines",
+            str(query_lines),
+            "--no-pager",
+            "--output",
+            "short-iso",
+        ]
+    )
+    if code != 0:
+        diagnostic = "\n".join(part for part in (output, error) if part)
+        lowered = diagnostic.lower()
+        if "permission" in lowered or "not authorized" in lowered:
+            message = "Insufficient permissions. Run this command with sudo."
+        elif previous and ("no journal" in lowered or "not found" in lowered):
+            message = "Previous boot journal is not available"
+        else:
+            message = f"Could not read boot journal: {diagnostic}" if diagnostic else "Could not read boot journal"
+        return BootLogReport(boot, priority, category, False, [], [], message), True
+
+    entries = parse_journal_entries(output)
+    if category != "all":
+        entries = [entry for entry in entries if log_matches_category(entry, category)][-lines:]
+    groups = group_log_entries(entries)
+    message = None if entries else "No errors found"
+    return BootLogReport(boot, priority, category, True, entries, groups, message), False
+
+
+def parse_journal_entries(output: str) -> list[str]:
+    entries: list[str] = []
+    for line in output.splitlines():
+        if not line.strip() or line.strip() == "-- No entries --":
+            continue
+        if line[0].isspace() and entries:
+            entries[-1] = f"{entries[-1]}\n{line.strip()}"
+        else:
+            entries.append(line.strip())
+    return entries
+
+
+def split_journal_entry(entry: str) -> tuple[str, str]:
+    first_line, _, continuation = entry.partition("\n")
+    match = re.match(r"^\S+\s+\S+\s+([^:]+):\s*(.*)$", first_line)
+    if match:
+        source = re.sub(r"\[\d+\]$", "", match.group(1)).strip()
+        message = match.group(2).strip()
+    else:
+        source = "journal"
+        message = first_line.strip()
+    if continuation:
+        message = f"{message}\n{continuation}"
+    return source, message
+
+
+def log_matches_category(entry: str, category: str) -> bool:
+    if category == "all":
+        return True
+
+    source, message = split_journal_entry(entry)
+    source_lower = source.lower()
+    searchable = f"{source} {message}"
+    if category == "resume":
+        if not any(source_lower == allowed or source_lower.startswith(f"{allowed}-") for allowed in RESUME_SOURCES):
+            return False
+        return any(re.search(pattern, message, re.IGNORECASE) for pattern in LOG_CATEGORY_PATTERNS[category])
+    return any(re.search(pattern, searchable, re.IGNORECASE) for pattern in LOG_CATEGORY_PATTERNS[category])
+
+
+def group_log_entries(entries: list[str]) -> list[dict[str, object]]:
+    grouped: dict[tuple[str, str], int] = {}
+    for entry in entries:
+        source, message = split_journal_entry(entry)
+        if not message:
+            continue
+        key = (source, message)
+        grouped[key] = grouped.get(key, 0) + 1
+    return [
+        {"source": source, "message": message, "count": count}
+        for (source, message), count in grouped.items()
+    ]
+
+
 def status_payload(checks: list[Check]) -> dict[str, object]:
     return {
         "schema_version": SCHEMA_VERSION,
@@ -397,11 +601,61 @@ def status_payload(checks: list[Check]) -> dict[str, object]:
     }
 
 
+def snapshots_payload(report: SnapshotReport) -> dict[str, object]:
+    return {
+        "schema_version": SCHEMA_VERSION,
+        "application": APP_NAME,
+        "version": VERSION,
+        "hostname": platform.node(),
+        "snapshot_report": asdict(report),
+    }
+
+
+def boot_log_payload(report: BootLogReport) -> dict[str, object]:
+    return {
+        "schema_version": SCHEMA_VERSION,
+        "application": APP_NAME,
+        "version": VERSION,
+        "hostname": platform.node(),
+        "boot_log": asdict(report),
+    }
+
+
+def colors_enabled() -> bool:
+    return sys.stdout.isatty() and "NO_COLOR" not in os.environ
+
+
+def colorize(text: str, color: str) -> str:
+    if not colors_enabled():
+        return text
+    return f"\033[{color}m{text}\033[0m"
+
+
+def print_header(section: str) -> None:
+    print(colorize(f"{APP_NAME} {VERSION}", "1;36"))
+    print(section)
+    print("-" * max(28, len(section)))
+
+
 def print_human(checks: list[Check]) -> None:
-    symbols = {"pass": "OK", "warning": "WARN", "fail": "FAIL", "skipped": "SKIP", "unknown": "?"}
-    print(f"{APP_NAME} {VERSION}\n")
+    print_header("System status")
+    title_width = max((len(check.title) for check in checks), default=0)
     for check in checks:
-        print(f"[{symbols.get(check.status, '?'):4}] {check.title}: {check.summary}")
+        label = f"[{STATUS_LABELS.get(check.status, '?'):4}]"
+        label = colorize(label, STATUS_COLORS.get(check.status, "0"))
+        print(f"{label} {check.title:<{title_width}}  {check.summary}")
+
+    counts = {status: sum(check.status == status for check in checks) for status in STATUS_LABELS}
+    summary = [f"{counts['pass']} passed"]
+    if counts["warning"]:
+        summary.append(f"{counts['warning']} warning(s)")
+    if counts["fail"]:
+        summary.append(f"{counts['fail']} failed")
+    if counts["skipped"]:
+        summary.append(f"{counts['skipped']} skipped")
+    if counts["unknown"]:
+        summary.append(f"{counts['unknown']} unknown")
+    print(f"\nSummary: {', '.join(summary)}")
 
 
 def print_doctor(checks: list[Check]) -> None:
@@ -413,6 +667,44 @@ def print_doctor(checks: list[Check]) -> None:
             print(f"- {check.title}: {check.evidence}")
 
 
+def print_snapshots(report: SnapshotReport) -> None:
+    print_header("Snapshots")
+    print(f"Boot mode         {report.boot_mode}")
+    if report.current_snapshot is not None:
+        print(f"Current snapshot  {report.current_snapshot}")
+    if report.listing:
+        print()
+        print(report.listing)
+    elif report.message:
+        print(report.message)
+
+
+def print_boot_log(report: BootLogReport, raw: bool = False) -> None:
+    print_header("Boot journal")
+    print(f"Boot      {report.boot}")
+    print(f"Priority  {report.priority}")
+    print(f"Category  {report.category}")
+    print(f"Entries   {len(report.entries)} raw, {len(report.groups)} grouped")
+    if raw and report.entries:
+        print()
+        print("\n".join(report.entries))
+    elif report.groups:
+        print()
+        for group in report.groups:
+            count = int(group["count"])
+            suffix = colorize(f" x{count}", "33") if count > 1 else ""
+            print(colorize(f"[{group['source']}]", "36"), f"{group['message']}{suffix}")
+    elif report.message:
+        print(report.message)
+
+
+def positive_int(value: str) -> int:
+    number = int(value)
+    if number < 1:
+        raise argparse.ArgumentTypeError("must be greater than zero")
+    return number
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="ergenctl", description="Read-only ErgenOS diagnostics")
     parser.add_argument("--version", action="version", version=f"%(prog)s {VERSION}")
@@ -421,6 +713,25 @@ def build_parser() -> argparse.ArgumentParser:
     status.add_argument("--json", action="store_true", dest="as_json", help="emit machine-readable JSON")
     doctor = subparsers.add_parser("doctor", help="run extended read-only ErgenOS diagnostics")
     doctor.add_argument("--json", action="store_true", dest="as_json", help="emit machine-readable JSON")
+    snapshots = subparsers.add_parser("snapshots", help="list Snapper snapshots without modifying them")
+    snapshots.add_argument("--json", action="store_true", dest="as_json", help="emit machine-readable JSON")
+    logs = subparsers.add_parser("logs", help="show errors from the system boot journal")
+    logs.add_argument("--previous", action="store_true", help="inspect the previous boot instead of the current boot")
+    logs.add_argument(
+        "--priority",
+        choices=("error", "warning"),
+        default="error",
+        help="minimum message priority to include (default: error)",
+    )
+    logs.add_argument("--lines", type=positive_int, default=100, help="maximum number of entries (default: 100)")
+    logs.add_argument(
+        "--category",
+        choices=("all", *LOG_CATEGORY_PATTERNS),
+        default="all",
+        help="show only a selected diagnostic category (default: all)",
+    )
+    logs.add_argument("--raw", action="store_true", help="show complete journal entries without grouping")
+    logs.add_argument("--json", action="store_true", dest="as_json", help="emit machine-readable JSON")
     return parser
 
 
@@ -440,6 +751,20 @@ def main(argv: Sequence[str] | None = None) -> int:
         else:
             print_doctor(checks)
         return 1 if any(check.status == "fail" for check in checks) else 0
+    if args.command == "snapshots":
+        report, failed = collect_snapshot_report()
+        if args.as_json:
+            print(json.dumps(snapshots_payload(report), indent=2, ensure_ascii=False))
+        else:
+            print_snapshots(report)
+        return 1 if failed else 0
+    if args.command == "logs":
+        report, failed = collect_boot_log(args.previous, args.priority, args.lines, args.category)
+        if args.as_json:
+            print(json.dumps(boot_log_payload(report), indent=2, ensure_ascii=False))
+        else:
+            print_boot_log(report, args.raw)
+        return 1 if failed else 0
     return 1
 
 
