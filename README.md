@@ -8,6 +8,11 @@
   Diagnostics, repair and snapshot recovery for ErgenOS.
 </p>
 
+<p align="center">
+  <a href="https://github.com/ErgenosSW/ErgenCTL/releases"><img src="https://img.shields.io/badge/release-v0.1.1--alpha-E36F3D" alt="Release v0.1.1-alpha"></a>
+  <a href="https://github.com/ErgenosSW/ErgenCTL/blob/main/LICENSE"><img src="https://img.shields.io/badge/license-GPL--3.0--or--later-1682B4" alt="License GPL-3.0-or-later"></a>
+</p>
+
 > [!WARNING]
 > ErgenCTL 0.1.1-alpha is experimental software. Recovery operations modify Btrfs subvolumes and boot configuration. Keep a verified backup before using repair or rollback commands.
 
