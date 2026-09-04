@@ -66,39 +66,39 @@ Diagnostic commands can run without root privileges where system permissions all
 
 ## Usage
 
-Run directly from the repository:
+ErgenCTL is installed in ErgenOS as the native `ergenctl` command:
 
 ```bash
-python3 ergenctl.py --help
+ergenctl --help
 ```
 
 ### System status
 
 ```bash
-python3 ergenctl.py status
-python3 ergenctl.py status --json
+ergenctl status
+ergenctl status --json
 ```
 
 ### Extended diagnostics
 
 ```bash
-sudo python3 ergenctl.py doctor
+sudo ergenctl doctor
 ```
 
 ### Snapshot information
 
 ```bash
-sudo python3 ergenctl.py snapshots
-sudo python3 ergenctl.py snapshots --json
+sudo ergenctl snapshots
+sudo ergenctl snapshots --json
 ```
 
 ### Boot journal
 
 ```bash
-sudo python3 ergenctl.py logs
-sudo python3 ergenctl.py logs --previous --priority warning
-sudo python3 ergenctl.py logs --category resume --priority warning
-sudo python3 ergenctl.py logs --category boot --raw
+sudo ergenctl logs
+sudo ergenctl logs --previous --priority warning
+sudo ergenctl logs --category resume --priority warning
+sudo ergenctl logs --category boot --raw
 ```
 
 Available log categories:
@@ -112,8 +112,8 @@ Available log categories:
 ### Resume diagnostics
 
 ```bash
-sudo python3 ergenctl.py resume
-sudo python3 ergenctl.py resume --json
+sudo ergenctl resume
+sudo ergenctl resume --json
 ```
 
 ## Repair
@@ -130,13 +130,13 @@ Supported repair targets:
 Always inspect a repair plan first:
 
 ```bash
-sudo python3 ergenctl.py fix all --dry-run
+sudo ergenctl fix all --dry-run
 ```
 
 Apply the required repairs:
 
 ```bash
-sudo python3 ergenctl.py fix all --yes
+sudo ergenctl fix all --yes
 ```
 
 Without `--yes`, ErgenCTL asks for confirmation. By default, it creates a safety snapshot before changing a recoverable Btrfs installation. The `--no-snapshot` option disables that protection and should be used only when another verified backup exists.
@@ -148,19 +148,19 @@ Rollback is available only when ErgenOS is running from a snapshot. It replaces 
 List snapshots and choose the required number:
 
 ```bash
-sudo python3 ergenctl.py snapshots
+sudo ergenctl snapshots
 ```
 
 Inspect the rollback plan:
 
 ```bash
-sudo python3 ergenctl.py rollback 8 --dry-run
+sudo ergenctl rollback 8 --dry-run
 ```
 
 Apply the rollback:
 
 ```bash
-sudo python3 ergenctl.py rollback 8 --yes
+sudo ergenctl rollback 8 --yes
 ```
 
 During rollback, ErgenCTL:
@@ -181,9 +181,9 @@ Do not remove the preserved `@-broken-*` subvolume until the restored system has
 Machine-readable output is available for diagnostics, logs, repairs and rollback operations:
 
 ```bash
-python3 ergenctl.py doctor --json
-sudo python3 ergenctl.py fix all --dry-run --json
-sudo python3 ergenctl.py rollback 8 --dry-run --json
+ergenctl doctor --json
+sudo ergenctl fix all --dry-run --json
+sudo ergenctl rollback 8 --dry-run --json
 ```
 
 The current JSON schema version is `1`.
