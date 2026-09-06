@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass
 from typing import Sequence
 
@@ -32,6 +33,22 @@ COMMANDS = {
     "repair": GuiCommand("Repair system", ("fix", "all", "--yes", "--json"), True),
 }
 
+LOG_CATEGORIES = ("all", "resume", "boot", "audio", "graphics")
+
+
+def log_command(previous: bool, priority: str, category: str, lines: int = 100) -> GuiCommand:
+    if priority not in {"error", "warning"}:
+        raise ValueError("invalid log priority")
+    if category not in LOG_CATEGORIES:
+        raise ValueError("invalid log category")
+    if lines <= 0:
+        raise ValueError("line limit must be greater than zero")
+    arguments = ["logs"]
+    if previous:
+        arguments.append("--previous")
+    arguments.extend(("--priority", priority, "--lines", str(lines), "--category", category, "--json"))
+    return GuiCommand("Boot logs", tuple(arguments), True)
+
 
 def rollback_command(snapshot: int, execute: bool = False) -> GuiCommand:
     if snapshot <= 0:
@@ -54,3 +71,21 @@ def repair_plan_can_execute(report: object) -> bool:
     if not isinstance(report, dict):
         return False
     return bool(report.get("dry_run") and report.get("success") and report.get("steps"))
+
+
+def is_kernel_trace_fragment(source: str, message: str) -> bool:
+    if source != "kernel":
+        return False
+    stripped = message.strip()
+    if stripped in {"Call Trace:", "<TASK>", "</TASK>"}:
+        return True
+    return re.match(r"^\??\s*[A-Za-z0-9_.]+\+0x[0-9a-f]+/0x[0-9a-f]+(?:\s.*)?$", stripped, re.IGNORECASE) is not None
+
+
+def compact_log_message(message: str, limit: int = 240) -> str:
+    first_line = message.strip().splitlines()[0] if message.strip() else "No message"
+    if len(first_line) > limit:
+        first_line = f"{first_line[: limit - 3].rstrip()}..."
+    if "\n" in message:
+        return f"{first_line} - full details hidden"
+    return first_line

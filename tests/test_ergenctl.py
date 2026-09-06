@@ -11,7 +11,15 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-from ergenctl_gui_core import COMMANDS, format_json_output, repair_plan_can_execute, rollback_command
+from ergenctl_gui_core import (
+    COMMANDS,
+    compact_log_message,
+    format_json_output,
+    is_kernel_trace_fragment,
+    log_command,
+    repair_plan_can_execute,
+    rollback_command,
+)
 
 
 MODULE_PATH = Path(__file__).resolve().parents[1] / "ergenctl.py"
@@ -55,6 +63,33 @@ class GuiCommandTests(unittest.TestCase):
         self.assertFalse(repair_plan_can_execute({"dry_run": True, "success": True, "steps": []}))
         self.assertFalse(repair_plan_can_execute({"dry_run": False, "success": True, "steps": ["Repair GRUB"]}))
         self.assertFalse(repair_plan_can_execute({"dry_run": True, "success": False, "steps": ["Repair GRUB"]}))
+
+    def test_log_command_contains_selected_filters(self) -> None:
+        command = log_command(previous=True, priority="warning", category="resume")
+
+        self.assertEqual(command.argv()[:3], ["pkexec", "ergenctl", "logs"])
+        self.assertIn("--previous", command.argv())
+        self.assertIn("warning", command.argv())
+        self.assertIn("resume", command.argv())
+
+    def test_log_command_rejects_invalid_filters(self) -> None:
+        with self.assertRaises(ValueError):
+            log_command(False, "debug", "all")
+        with self.assertRaises(ValueError):
+            log_command(False, "error", "network")
+
+    def test_kernel_call_trace_lines_are_recognized(self) -> None:
+        self.assertTrue(is_kernel_trace_fragment("kernel", "Call Trace:"))
+        self.assertTrue(is_kernel_trace_fragment("kernel", "? perf_event_alloc+0x8f1/0x11d0"))
+        self.assertTrue(is_kernel_trace_fragment("kernel", "ret_from_fork+0x292/0x330"))
+        self.assertFalse(is_kernel_trace_fragment("kernel", "virt/tdx: TDX not supported by the host platform"))
+        self.assertFalse(is_kernel_trace_fragment("systemd", "worker+0x1/0x2"))
+
+    def test_multiline_log_message_is_compacted(self) -> None:
+        self.assertEqual(
+            compact_log_message("Process dumped core.\nStack trace line 1\nStack trace line 2"),
+            "Process dumped core. - full details hidden",
+        )
 
 
 class DistributionCheckTests(unittest.TestCase):

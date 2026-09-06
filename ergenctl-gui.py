@@ -22,7 +22,10 @@ if installed_module_directory.is_dir():
 from ergenctl_gui_core import (
     COMMANDS,
     GuiCommand,
+    compact_log_message,
     format_json_output,
+    is_kernel_trace_fragment,
+    log_command,
     repair_plan_can_execute,
     rollback_command,
 )
@@ -74,6 +77,9 @@ class ErgenCTLWindow(Adw.ApplicationWindow):
         self._add_action(actions, "Check system", "Run complete system diagnostics", "doctor")
         self._add_action(actions, "Check snapshots", "List available recovery points", "snapshots")
         self._add_action(actions, "Check hibernation", "Inspect resume configuration", "resume")
+        logs_button = Gtk.Button(label="Check boot logs", tooltip_text="Inspect errors and warnings from system startup")
+        logs_button.connect("clicked", self._show_logs_dialog)
+        actions.append(logs_button)
         self._add_action(actions, "Plan repairs", "Show changes without applying them", "repair-plan")
 
         self.repair_button = Gtk.Button(
@@ -195,6 +201,44 @@ class ErgenCTLWindow(Adw.ApplicationWindow):
         dialog.connect("response", lambda _dialog, response: self._run(rollback_command(snapshot, True)) if response == "restore" else None)
         dialog.present(self)
 
+    def _show_logs_dialog(self, _button: Gtk.Button) -> None:
+        boot = Adw.ComboRow(title="Boot", model=Gtk.StringList.new(["Current", "Previous"]))
+        priority = Adw.ComboRow(title="Minimum priority", model=Gtk.StringList.new(["Errors", "Warnings"]))
+        category = Adw.ComboRow(
+            title="Category",
+            model=Gtk.StringList.new(["All", "Resume", "Boot", "Audio", "Graphics"]),
+        )
+        options = Gtk.ListBox(selection_mode=Gtk.SelectionMode.NONE)
+        options.add_css_class("boxed-list")
+        options.append(boot)
+        options.append(priority)
+        options.append(category)
+        dialog = Adw.AlertDialog(
+            heading="Check boot logs",
+            body="Choose which journal entries ErgenCTL should inspect.",
+        )
+        dialog.set_extra_child(options)
+        dialog.add_response("cancel", "Cancel")
+        dialog.add_response("check", "Check")
+        dialog.set_response_appearance("check", Adw.ResponseAppearance.SUGGESTED)
+        dialog.set_default_response("check")
+        dialog.set_close_response("cancel")
+
+        def respond(_dialog: Adw.AlertDialog, response: str) -> None:
+            if response != "check":
+                return
+            categories = ("all", "resume", "boot", "audio", "graphics")
+            self._run(
+                log_command(
+                    previous=boot.get_selected() == 1,
+                    priority="warning" if priority.get_selected() == 1 else "error",
+                    category=categories[category.get_selected()],
+                )
+            )
+
+        dialog.connect("response", respond)
+        dialog.present(self)
+
     def _run(self, command: GuiCommand) -> None:
         installed = shutil.which("ergenctl")
         executable: str | tuple[str, str]
@@ -246,6 +290,7 @@ class ErgenCTLWindow(Adw.ApplicationWindow):
         command: GuiCommand | None = None,
     ) -> None:
         self.spinner.stop()
+        GLib.idle_add(self._scroll_results_to_top)
         prefix = "Completed" if success else "Failed"
         self._clear_results()
         self.result_heading.set_label(title)
@@ -286,6 +331,10 @@ class ErgenCTLWindow(Adw.ApplicationWindow):
             return
 
         report = next((value for key, value in payload.items() if key.endswith("_report")), None)
+        log_report = payload.get("boot_log")
+        if command is not None and command.title == "Boot logs" and isinstance(log_report, dict):
+            self._show_log_report(log_report)
+            return
         if command is COMMANDS["snapshots"] and isinstance(report, dict):
             self._show_snapshots(report)
             return
@@ -300,6 +349,37 @@ class ErgenCTLWindow(Adw.ApplicationWindow):
             self.result_summary.set_label(prefix)
             self._append_result(title, prefix, "pass" if success else "fail")
         self.raw_expander.set_expanded(not success)
+
+    def _show_log_report(self, report: dict[str, object]) -> None:
+        groups = report.get("groups")
+        grouped = groups if isinstance(groups, list) else []
+        boot = str(report.get("boot", "current"))
+        priority = str(report.get("priority", "error"))
+        category = str(report.get("category", "all"))
+        if not grouped:
+            self.result_summary.set_label(f"{boot.capitalize()} boot - {priority} - {category} - no entries")
+            self._append_result("Boot journal", str(report.get("message") or "No errors found"), "pass")
+            self.raw_expander.set_expanded(False)
+            return
+        row_status = "fail" if priority == "error" else "warning"
+        visible_groups = [
+            group
+            for group in grouped
+            if isinstance(group, dict)
+            and not is_kernel_trace_fragment(str(group.get("source") or "journal"), str(group.get("message") or ""))
+        ]
+        hidden_count = len(grouped) - len(visible_groups)
+        summary = f"{boot.capitalize()} boot - {priority} - {category} - {len(visible_groups)} message(s)"
+        if hidden_count:
+            summary += f" - {hidden_count} trace line(s) in Technical details"
+        self.result_summary.set_label(summary)
+        for group in visible_groups:
+            source = str(group.get("source") or "journal")
+            message = compact_log_message(str(group.get("message") or "No message"))
+            count = group.get("count", 1)
+            suffix = f" - repeated {count} times" if isinstance(count, int) and count > 1 else ""
+            self._append_result(source, f"{message}{suffix}", row_status)
+        self.raw_expander.set_expanded(False)
 
     def _show_repair_report(self, report: dict[str, object], is_plan: bool) -> None:
         success = bool(report.get("success"))
@@ -406,6 +486,11 @@ class ErgenCTLWindow(Adw.ApplicationWindow):
                 child = next_child
         self.skipped_expander.set_visible(False)
         self.skipped_expander.set_expanded(False)
+
+    def _scroll_results_to_top(self) -> bool:
+        adjustment = self.output_scroll.get_vadjustment()
+        adjustment.set_value(adjustment.get_lower())
+        return GLib.SOURCE_REMOVE
 
 
 class ErgenCTLApplication(Adw.Application):
