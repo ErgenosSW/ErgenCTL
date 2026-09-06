@@ -11,7 +11,7 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-from ergenctl_gui_core import COMMANDS, format_json_output, rollback_command
+from ergenctl_gui_core import COMMANDS, format_json_output, repair_plan_can_execute, rollback_command
 
 
 MODULE_PATH = Path(__file__).resolve().parents[1] / "ergenctl.py"
@@ -49,6 +49,12 @@ class GuiCommandTests(unittest.TestCase):
     def test_json_output_is_formatted(self) -> None:
         self.assertEqual(format_json_output('{"ok":true}'), '{\n  "ok": true\n}')
         self.assertEqual(format_json_output("plain error"), "plain error")
+
+    def test_repair_requires_successful_non_empty_plan(self) -> None:
+        self.assertTrue(repair_plan_can_execute({"dry_run": True, "success": True, "steps": ["Repair GRUB"]}))
+        self.assertFalse(repair_plan_can_execute({"dry_run": True, "success": True, "steps": []}))
+        self.assertFalse(repair_plan_can_execute({"dry_run": False, "success": True, "steps": ["Repair GRUB"]}))
+        self.assertFalse(repair_plan_can_execute({"dry_run": True, "success": False, "steps": ["Repair GRUB"]}))
 
 
 class DistributionCheckTests(unittest.TestCase):

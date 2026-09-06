@@ -48,3 +48,9 @@ def format_json_output(output: str) -> str:
     except json.JSONDecodeError:
         return output.strip()
     return json.dumps(value, indent=2, ensure_ascii=False)
+
+
+def repair_plan_can_execute(report: object) -> bool:
+    if not isinstance(report, dict):
+        return False
+    return bool(report.get("dry_run") and report.get("success") and report.get("steps"))

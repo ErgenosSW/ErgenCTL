@@ -19,7 +19,13 @@ installed_module_directory = Path("/usr/lib/ergenctl")
 if installed_module_directory.is_dir():
     sys.path.insert(0, str(installed_module_directory))
 
-from ergenctl_gui_core import COMMANDS, GuiCommand, format_json_output, rollback_command
+from ergenctl_gui_core import (
+    COMMANDS,
+    GuiCommand,
+    format_json_output,
+    repair_plan_can_execute,
+    rollback_command,
+)
 
 
 APP_ID = "io.github.ergenossw.ErgenCTL"
@@ -31,6 +37,7 @@ class ErgenCTLWindow(Adw.ApplicationWindow):
         self.set_default_size(900, 720)
         self.boot_mode: str | None = None
         self.selected_snapshot: int | None = None
+        self.repair_plan_ready = False
 
         toolbar = Adw.ToolbarView()
         toolbar.add_top_bar(Adw.HeaderBar())
@@ -195,6 +202,10 @@ class ErgenCTLWindow(Adw.ApplicationWindow):
             executable = installed
         else:
             executable = (sys.executable, str(Path(__file__).resolve().with_name("ergenctl.py")))
+        if command is COMMANDS["repair"]:
+            self.repair_plan_ready = False
+            self.repair_button.set_sensitive(False)
+            self.repair_button.set_tooltip_text("Run Plan repairs again after this operation")
         if command.privileged and shutil.which("pkexec") is None:
             self._show_result(command.title, "pkexec is not installed", False)
             return
@@ -264,8 +275,9 @@ class ErgenCTLWindow(Adw.ApplicationWindow):
             for check in ordered:
                 self._append_result(check["title"], check["summary"], check["status"])
             if command is COMMANDS["doctor"]:
-                self.repair_button.set_sensitive(True)
-                self.repair_button.set_tooltip_text("Apply supported repairs")
+                self.repair_plan_ready = False
+                self.repair_button.set_sensitive(False)
+                self.repair_button.set_tooltip_text("Run Plan repairs before applying changes")
                 snapshot_boot = any(check["id"] == "boot-mode" and check["summary"] == "snapshot" for check in checks)
                 self.boot_mode = "snapshot" if snapshot_boot else "normal"
                 self.rollback_button.set_sensitive(snapshot_boot and self.selected_snapshot is not None)
@@ -277,6 +289,9 @@ class ErgenCTLWindow(Adw.ApplicationWindow):
         if command is COMMANDS["snapshots"] and isinstance(report, dict):
             self._show_snapshots(report)
             return
+        if command in (COMMANDS["repair-plan"], COMMANDS["repair"]) and isinstance(report, dict):
+            self._show_repair_report(report, command is COMMANDS["repair-plan"])
+            return
         if isinstance(report, dict):
             result = report.get("message") or ("Operation completed" if report.get("success", success) else "Operation failed")
             self.result_summary.set_label(prefix)
@@ -284,6 +299,49 @@ class ErgenCTLWindow(Adw.ApplicationWindow):
         else:
             self.result_summary.set_label(prefix)
             self._append_result(title, prefix, "pass" if success else "fail")
+        self.raw_expander.set_expanded(not success)
+
+    def _show_repair_report(self, report: dict[str, object], is_plan: bool) -> None:
+        success = bool(report.get("success"))
+        steps = report.get("steps")
+        step_names = [str(step) for step in steps] if isinstance(steps, list) else []
+        system = "Base installation from snapshot" if report.get("recovery_mode") else "Current installation"
+        self._append_result("Target system", system, "pass")
+
+        if step_names:
+            for number, step in enumerate(step_names, start=1):
+                self._append_result(f"Step {number}", step, "pass" if success else "fail")
+        else:
+            message = str(report.get("message") or "No repairs are needed")
+            self._append_result("Changes", message, "pass" if success else "fail")
+
+        actions = report.get("executed_actions")
+        if isinstance(actions, list):
+            for action in actions:
+                self._append_result("Built-in action", str(action), "pass" if success else "fail")
+
+        commands = report.get("executed_commands")
+        command_count = len(commands) if isinstance(commands, list) else 0
+        if command_count:
+            self._append_result("System commands", f"{command_count} command(s) listed in Technical details", "pass")
+
+        if report.get("reboot_required"):
+            self._append_result("Restart required", "Reboot after applying these changes", "warning")
+
+        if is_plan:
+            self.repair_plan_ready = repair_plan_can_execute(report)
+            self.repair_button.set_sensitive(self.repair_plan_ready)
+            self.repair_button.set_tooltip_text(
+                "Apply the displayed repair plan" if self.repair_plan_ready else "No repairs are available to apply"
+            )
+            self.result_summary.set_label(
+                f"{len(step_names)} repair step(s) ready" if self.repair_plan_ready else str(report.get("message") or "No repairs are needed")
+            )
+        else:
+            self.repair_plan_ready = False
+            self.repair_button.set_sensitive(False)
+            self.repair_button.set_tooltip_text("Run Plan repairs before applying changes")
+            self.result_summary.set_label("Repair completed" if success else "Repair failed")
         self.raw_expander.set_expanded(not success)
 
     def _show_snapshots(self, report: dict[str, object]) -> None:
