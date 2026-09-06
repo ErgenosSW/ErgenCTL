@@ -9,12 +9,12 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/ErgenosSW/ErgenCTL/releases"><img src="https://img.shields.io/badge/release-v0.1.2--alpha-E36F3D" alt="Release v0.1.2-alpha"></a>
+  <a href="https://github.com/ErgenosSW/ErgenCTL/releases"><img src="https://img.shields.io/badge/release-v1.0.0-E36F3D" alt="Release v1.0.0"></a>
   <a href="https://github.com/ErgenosSW/ErgenCTL/blob/main/LICENSE"><img src="https://img.shields.io/badge/license-GPL--3.0--or--later-1682B4" alt="License GPL-3.0-or-later"></a>
 </p>
 
-> [!WARNING]
-> ErgenCTL 0.1.2-alpha is experimental software. Recovery operations modify Btrfs subvolumes and boot configuration. Keep a verified backup before using repair or rollback commands.
+> [!CAUTION]
+> Recovery operations modify Btrfs subvolumes and boot configuration. Keep a verified backup before using repair or rollback commands.
 
 ## Overview
 
@@ -208,7 +208,7 @@ The recovery and rollback paths have also been tested in a QEMU/KVM ErgenOS inst
 
 ## Project status
 
-ErgenCTL is currently an alpha project. The tested workflow is based on the ErgenOS Btrfs and Snapper layout. Other distributions and custom storage layouts are not supported repair targets.
+ErgenCTL 1.0 supports the tested ErgenOS Btrfs and Snapper layout. Other distributions and custom storage layouts are not supported repair targets.
 
 ## License
 

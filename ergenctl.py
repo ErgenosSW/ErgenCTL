@@ -22,7 +22,7 @@ from typing import Sequence
 
 
 APP_NAME = "ErgenCTL"
-VERSION = "0.1.3-dev"
+VERSION = "1.0.0"
 SCHEMA_VERSION = 1
 
 
