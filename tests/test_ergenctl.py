@@ -11,6 +11,8 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
+from ergenctl_gui_core import COMMANDS, format_json_output, rollback_command
+
 
 MODULE_PATH = Path(__file__).resolve().parents[1] / "ergenctl.py"
 SPEC = importlib.util.spec_from_file_location("ergenctl", MODULE_PATH)
@@ -20,6 +22,33 @@ if SPEC is None or SPEC.loader is None:
 ergenctl = importlib.util.module_from_spec(SPEC)
 sys.modules[SPEC.name] = ergenctl
 SPEC.loader.exec_module(ergenctl)
+
+
+class GuiCommandTests(unittest.TestCase):
+    def test_diagnostics_do_not_request_privileges(self) -> None:
+        self.assertEqual(COMMANDS["doctor"].argv(), ["ergenctl", "doctor", "--json"])
+
+    def test_repair_uses_pkexec(self) -> None:
+        self.assertEqual(
+            COMMANDS["repair"].argv(),
+            ["pkexec", "ergenctl", "fix", "all", "--yes", "--json"],
+        )
+
+    def test_local_python_launcher_can_be_used(self) -> None:
+        self.assertEqual(
+            COMMANDS["doctor"].argv(("/usr/bin/python3", "/tmp/ergenctl.py")),
+            ["/usr/bin/python3", "/tmp/ergenctl.py", "doctor", "--json"],
+        )
+
+    def test_rollback_command_validates_snapshot(self) -> None:
+        self.assertIn("--dry-run", rollback_command(8).argv())
+        self.assertIn("--yes", rollback_command(8, execute=True).argv())
+        with self.assertRaises(ValueError):
+            rollback_command(0)
+
+    def test_json_output_is_formatted(self) -> None:
+        self.assertEqual(format_json_output('{"ok":true}'), '{\n  "ok": true\n}')
+        self.assertEqual(format_json_output("plain error"), "plain error")
 
 
 class DistributionCheckTests(unittest.TestCase):

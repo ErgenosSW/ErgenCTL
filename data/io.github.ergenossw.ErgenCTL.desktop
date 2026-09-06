@@ -1,0 +1,10 @@
+[Desktop Entry]
+Name=ErgenCTL
+Comment=Diagnose and recover ErgenOS
+Exec=ergenctl-gui
+Icon=ergenctl
+Terminal=false
+Type=Application
+Categories=System;
+Keywords=ErgenOS;diagnostics;repair;snapshot;recovery;
+StartupNotify=true

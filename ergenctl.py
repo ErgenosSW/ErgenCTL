@@ -20,7 +20,7 @@ from typing import Sequence
 
 
 APP_NAME = "ErgenCTL"
-VERSION = "0.1.1-alpha"
+VERSION = "0.1.2-alpha"
 SCHEMA_VERSION = 1
 
 

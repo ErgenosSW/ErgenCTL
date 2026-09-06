@@ -9,16 +9,16 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/ErgenosSW/ErgenCTL/releases"><img src="https://img.shields.io/badge/release-v0.1.1--alpha-E36F3D" alt="Release v0.1.1-alpha"></a>
+  <a href="https://github.com/ErgenosSW/ErgenCTL/releases"><img src="https://img.shields.io/badge/release-v0.1.2--alpha-E36F3D" alt="Release v0.1.2-alpha"></a>
   <a href="https://github.com/ErgenosSW/ErgenCTL/blob/main/LICENSE"><img src="https://img.shields.io/badge/license-GPL--3.0--or--later-1682B4" alt="License GPL-3.0-or-later"></a>
 </p>
 
 > [!WARNING]
-> ErgenCTL 0.1.1-alpha is experimental software. Recovery operations modify Btrfs subvolumes and boot configuration. Keep a verified backup before using repair or rollback commands.
+> ErgenCTL 0.1.2-alpha is experimental software. Recovery operations modify Btrfs subvolumes and boot configuration. Keep a verified backup before using repair or rollback commands.
 
 ## Overview
 
-ErgenCTL is a command-line recovery utility built for ErgenOS. It inspects the installed system, reports boot and snapshot problems, repairs supported configuration faults and can restore the base Btrfs root from a Snapper snapshot.
+ErgenCTL is a recovery utility built for ErgenOS. It provides both a command-line interface and a graphical interface for system checks, supported repairs and Btrfs snapshot recovery.
 
 The recovery workflow is designed for a system that no longer starts normally:
 
@@ -71,6 +71,14 @@ ErgenCTL is installed in ErgenOS as the native `ergenctl` command:
 ```bash
 ergenctl --help
 ```
+
+The graphical interface can be opened from the application menu or with:
+
+```bash
+ergenctl-gui
+```
+
+Actions that modify the system request administrator authentication when needed. Read-only checks remain available without authentication where system permissions allow it.
 
 ### System status
 
