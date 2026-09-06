@@ -29,6 +29,8 @@ class ErgenCTLWindow(Adw.ApplicationWindow):
     def __init__(self, application: Adw.Application) -> None:
         super().__init__(application=application, title="ErgenCTL")
         self.set_default_size(900, 720)
+        self.boot_mode: str | None = None
+        self.selected_snapshot: int | None = None
 
         toolbar = Adw.ToolbarView()
         toolbar.add_top_bar(Adw.HeaderBar())
@@ -146,6 +148,9 @@ class ErgenCTLWindow(Adw.ApplicationWindow):
         dialog.present(self)
 
     def _show_rollback_dialog(self, _button: Gtk.Button) -> None:
+        if self.boot_mode == "snapshot" and self.selected_snapshot is not None:
+            self._confirm_rollback(self.selected_snapshot)
+            return
         row = Adw.SpinRow.new_with_range(1, 999999, 1)
         row.set_title("Snapshot number")
         dialog = Adw.AlertDialog(
@@ -262,14 +267,16 @@ class ErgenCTLWindow(Adw.ApplicationWindow):
                 self.repair_button.set_sensitive(True)
                 self.repair_button.set_tooltip_text("Apply supported repairs")
                 snapshot_boot = any(check["id"] == "boot-mode" and check["summary"] == "snapshot" for check in checks)
-                self.rollback_button.set_sensitive(snapshot_boot)
-                self.rollback_button.set_tooltip_text(
-                    "Restore the base system from a snapshot" if snapshot_boot else "Available after booting from a snapshot"
-                )
+                self.boot_mode = "snapshot" if snapshot_boot else "normal"
+                self.rollback_button.set_sensitive(snapshot_boot and self.selected_snapshot is not None)
+                self.rollback_button.set_tooltip_text("Run Check snapshots to select the current snapshot" if snapshot_boot else "Available after booting from a snapshot")
             self.raw_expander.set_expanded(False)
             return
 
         report = next((value for key, value in payload.items() if key.endswith("_report")), None)
+        if command is COMMANDS["snapshots"] and isinstance(report, dict):
+            self._show_snapshots(report)
+            return
         if isinstance(report, dict):
             result = report.get("message") or ("Operation completed" if report.get("success", success) else "Operation failed")
             self.result_summary.set_label(prefix)
@@ -278,6 +285,39 @@ class ErgenCTLWindow(Adw.ApplicationWindow):
             self.result_summary.set_label(prefix)
             self._append_result(title, prefix, "pass" if success else "fail")
         self.raw_expander.set_expanded(not success)
+
+    def _show_snapshots(self, report: dict[str, object]) -> None:
+        self.boot_mode = str(report.get("boot_mode", "normal"))
+        current = report.get("current_snapshot")
+        self.selected_snapshot = int(current) if isinstance(current, int) else None
+        entries = report.get("entries", [])
+        if isinstance(entries, list):
+            for entry in reversed(entries):
+                if not isinstance(entry, dict) or not isinstance(entry.get("number"), int):
+                    continue
+                number = int(entry["number"])
+                description = str(entry.get("description") or "No description")
+                date = str(entry.get("date") or "Current system")
+                kind = str(entry.get("type") or "snapshot")
+                self._append_snapshot(number, description, f"{date} - {kind}")
+
+        if self.boot_mode == "snapshot" and self.selected_snapshot is not None:
+            self._append_snapshot(self.selected_snapshot, "Currently booted snapshot", "Ready for rollback")
+            self.rollback_button.set_sensitive(True)
+            self.rollback_button.set_tooltip_text(f"Restore snapshot {self.selected_snapshot}")
+            self.result_summary.set_label(f"Booted from snapshot {self.selected_snapshot}")
+        elif entries:
+            self.result_summary.set_label(f"{len(entries)} snapshot(s) found")
+        else:
+            self.result_summary.set_label(str(report.get("message") or "No snapshots found"))
+        self.raw_expander.set_expanded(False)
+
+    def _append_snapshot(self, number: int, title: str, subtitle: str) -> None:
+        row = Adw.ActionRow(title=f"Snapshot {number} - {title}", subtitle=subtitle)
+        badge = Gtk.Label(label=str(number), width_chars=3)
+        badge.add_css_class("accent")
+        row.add_prefix(badge)
+        self.results.append(row)
 
     def _append_result(self, title: str, summary: str, status: str) -> None:
         labels = {

@@ -4,6 +4,8 @@
 from __future__ import annotations
 
 import argparse
+import csv
+import io
 import json
 import os
 import platform
@@ -20,7 +22,7 @@ from typing import Sequence
 
 
 APP_NAME = "ErgenCTL"
-VERSION = "0.1.2-alpha"
+VERSION = "0.1.3-dev"
 SCHEMA_VERSION = 1
 
 
@@ -40,6 +42,7 @@ class SnapshotReport:
     available: bool
     listing: str | None
     message: str | None = None
+    entries: list[dict[str, object]] = field(default_factory=list)
 
 
 @dataclass(frozen=True)
@@ -617,6 +620,28 @@ def snapshot_number_from_cmdline(cmdline: str) -> int | None:
     return int(match.group(1)) if match else None
 
 
+def parse_snapper_csv(output: str) -> list[dict[str, object]]:
+    entries: list[dict[str, object]] = []
+    for row in csv.reader(io.StringIO(output), delimiter="\t"):
+        if len(row) < 7 or not row[0].strip().isdigit():
+            continue
+        number = int(row[0].strip())
+        if number == 0:
+            continue
+        entries.append(
+            {
+                "number": number,
+                "type": row[1].strip(),
+                "pre_number": row[2].strip() or None,
+                "date": row[3].strip() or None,
+                "user": row[4].strip(),
+                "cleanup": row[5].strip() or None,
+                "description": row[6].strip(),
+            }
+        )
+    return entries
+
+
 def collect_snapshot_report() -> tuple[SnapshotReport, bool]:
     cmdline = read_cmdline()
     current_snapshot = snapshot_number_from_cmdline(cmdline)
@@ -639,14 +664,29 @@ def collect_snapshot_report() -> tuple[SnapshotReport, bool]:
             message="snapper is not installed",
         ), True
 
-    code, output, error = run(["snapper", "-c", "root", "list"])
+    code, output, error = run(
+        [
+            "snapper",
+            "--csvout",
+            "--separator",
+            "\t",
+            "--no-headers",
+            "-c",
+            "root",
+            "list",
+            "--columns",
+            "number,type,pre-number,date,user,cleanup,description",
+        ]
+    )
     if code == 0:
+        entries = parse_snapper_csv(output)
         return SnapshotReport(
             boot_mode="normal",
             current_snapshot=current_snapshot,
             available=True,
             listing=output or None,
             message=None if output else "No snapshots found",
+            entries=entries,
         ), False
 
     diagnostic = "\n".join(part for part in (output, error) if part)

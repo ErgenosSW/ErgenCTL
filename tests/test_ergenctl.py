@@ -167,6 +167,17 @@ class SnapshotTests(unittest.TestCase):
 
 
 class SnapshotReportTests(unittest.TestCase):
+    def test_snapper_csv_is_parsed_for_graphical_clients(self) -> None:
+        output = (
+            "#\tType\tPre #\tDate\tUser\tCleanup\tDescription\tUserdata\n"
+            "8\tsingle\t\t2026-09-04 00:00:00\troot\tnumber\tKnown good\t\n"
+        )
+
+        entries = ergenctl.parse_snapper_csv(output)
+
+        self.assertEqual(entries[0]["number"], 8)
+        self.assertEqual(entries[0]["description"], "Known good")
+
     def test_snapshot_report_skips_listing_for_overlay_boot(self) -> None:
         with (
             patch.object(
