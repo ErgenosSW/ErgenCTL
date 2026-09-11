@@ -13,7 +13,7 @@ import gi
 gi.require_version("Gtk", "4.0")
 gi.require_version("Adw", "1")
 
-from gi.repository import Adw, Gio, GLib, Gtk  # noqa: E402
+from gi.repository import Adw, Gio, GLib, GObject, Gtk  # noqa: E402
 
 installed_module_directory = Path("/usr/lib/ergenctl")
 if installed_module_directory.is_dir():
@@ -31,6 +31,9 @@ from ergenctl_gui_core import (
 )
 
 
+from ergenctl_secureboot_gui import SecureBootPage
+
+
 APP_ID = "io.github.ergenossw.ErgenCTL"
 
 
@@ -41,16 +44,31 @@ class ErgenCTLWindow(Adw.ApplicationWindow):
         self.boot_mode: str | None = None
         self.selected_snapshot: int | None = None
         self.repair_plan_ready = False
+        self.operation_busy = False
+        self.connect("close-request", self._close_requested)
 
         toolbar = Adw.ToolbarView()
-        toolbar.add_top_bar(Adw.HeaderBar())
+        header = Adw.HeaderBar()
+        self.pages = Adw.ViewStack()
+        switcher_title = Adw.ViewSwitcherTitle(stack=self.pages)
+        header.set_title_widget(switcher_title)
+        toolbar.add_top_bar(header)
+        switcher_bar = Adw.ViewSwitcherBar(stack=self.pages)
+        switcher_title.bind_property(
+            "title-visible",
+            switcher_bar,
+            "reveal",
+            GObject.BindingFlags.SYNC_CREATE | GObject.BindingFlags.INVERT_BOOLEAN,
+        )
+        toolbar.add_bottom_bar(switcher_bar)
         self.set_content(toolbar)
 
         split = Adw.OverlaySplitView()
         split.set_sidebar_width_fraction(0.34)
         split.set_min_sidebar_width(280)
         split.set_max_sidebar_width(360)
-        toolbar.set_content(split)
+        toolbar.set_content(self.pages)
+        self.pages.add_titled_with_icon(split, "repair", "Repair", "system-tools-symbolic")
 
         sidebar = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=18)
         sidebar.set_margin_top(24)
@@ -74,6 +92,7 @@ class ErgenCTLWindow(Adw.ApplicationWindow):
 
         actions = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
         sidebar.append(actions)
+        self.repair_actions = actions
         self._add_action(actions, "Check system", "Run complete system diagnostics", "doctor")
         self._add_action(actions, "Check snapshots", "List available recovery points", "snapshots")
         self._add_action(actions, "Check hibernation", "Inspect resume configuration", "resume")
@@ -141,6 +160,22 @@ class ErgenCTLWindow(Adw.ApplicationWindow):
 
         self.spinner = Gtk.Spinner()
         content.append(self.spinner)
+        self.secureboot_page = SecureBootPage(self)
+        self.pages.add_titled_with_icon(self.secureboot_page, "secureboot", "Secure Boot", "security-high-symbolic")
+        self.pages.set_visible_child_name("repair")
+
+    def set_operation_busy(self, busy: bool) -> None:
+        self.operation_busy = busy
+        self.repair_actions.set_sensitive(not busy)
+        self.secureboot_page.update_buttons()
+
+    def _close_requested(self, _window) -> bool:
+        if not self.operation_busy:
+            return False
+        dialog = Adw.AlertDialog(heading="Operation in progress", body="Wait for the current operation to finish before closing ErgenCTL.")
+        dialog.add_response("ok", "OK")
+        dialog.present(self)
+        return True
 
     def _add_action(self, box: Gtk.Box, label: str, tooltip: str, command: str) -> None:
         button = Gtk.Button(label=label, tooltip_text=tooltip)
@@ -240,6 +275,9 @@ class ErgenCTLWindow(Adw.ApplicationWindow):
         dialog.present(self)
 
     def _run(self, command: GuiCommand) -> None:
+        if self.operation_busy:
+            return
+        self.set_operation_busy(True)
         installed = shutil.which("ergenctl")
         executable: str | tuple[str, str]
         if installed:
@@ -290,6 +328,7 @@ class ErgenCTLWindow(Adw.ApplicationWindow):
         command: GuiCommand | None = None,
     ) -> None:
         self.spinner.stop()
+        self.set_operation_busy(False)
         GLib.idle_add(self._scroll_results_to_top)
         prefix = "Completed" if success else "Failed"
         self._clear_results()

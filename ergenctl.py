@@ -22,7 +22,7 @@ from typing import Sequence
 
 
 APP_NAME = "ErgenCTL"
-VERSION = "1.0.0"
+VERSION = "1.1.0.dev"
 SCHEMA_VERSION = 1
 
 
@@ -586,6 +586,24 @@ def failed_units_check() -> Check:
     return Check("failed-units", "Failed systemd units", "pass", "none")
 
 
+def secureboot_check() -> Check:
+    title = "Secure Boot"
+    if not Path("/usr/bin/ergenos-secureboot").is_file():
+        return Check("secureboot", title, "skipped", "optional package not installed")
+    if os.geteuid() != 0:
+        return Check("secureboot", title, "skipped", "administrator authentication required", "Open the Secure Boot tab to check the configuration")
+    code, output, error = run(["/usr/bin/ergenos-secureboot", "status", "--json"])
+    try:
+        status = json.loads(output)
+        if code or not isinstance(status, dict) or not isinstance(status.get("state"), str):
+            raise ValueError("incomplete result")
+        problems = status.get("problems", [])
+        level = "fail" if problems else ("pass" if status["state"] == "active" else "warning")
+        return Check("secureboot", title, level, status["state"], "; ".join(problems) or None)
+    except (ValueError, TypeError):
+        return Check("secureboot", title, "warning", "could not verify", error or "Invalid backend response")
+
+
 def collect_checks(root_fstype: str | None = None) -> list[Check]:
     if root_fstype is None:
         root_fstype = root_filesystem_type()
@@ -594,6 +612,7 @@ def collect_checks(root_fstype: str | None = None) -> list[Check]:
         distribution_check(),
         Check("kernel", "Kernel", "pass", platform.release()),
         firmware_check(),
+        secureboot_check(),
         root_check(),
         boot_mode_check(snapshot_detection),
         disk_space_check(snapshot_detection),
@@ -1373,6 +1392,49 @@ def validate_repair_step(
     return Check(step.id, step.title, "pass", "commands completed, reboot required")
 
 
+def target_secureboot_configured(root: Path) -> bool:
+    state_path = root / "var/lib/ergenos/secureboot/state.json"
+    try:
+        state = json.loads(state_path.read_text())
+    except FileNotFoundError:
+        if (root / "var/lib/ergenos/secureboot/keys/MOK.key").exists():
+            raise ValueError("Secure Boot keys exist but state is missing; inspect configuration before recovery")
+        return False
+    except (OSError, ValueError) as error:
+        raise ValueError("Cannot read target Secure Boot configuration") from error
+    if not isinstance(state, dict) or type(state.get("configured")) is not bool:
+        raise ValueError("Invalid target Secure Boot configuration")
+    return state["configured"]
+
+
+def secureboot_recovery_commands(root: Path) -> tuple[tuple[str, ...], ...]:
+    if not target_secureboot_configured(root):
+        return ()
+    for relative in ("usr/bin/ergenos-secureboot", "var/lib/ergenos/secureboot/keys/MOK.key",
+                     "var/lib/ergenos/secureboot/keys/MOK.cer", "var/lib/ergenos/secureboot/keys/MOK.crt"):
+        if not (root / relative).is_file():
+            raise ValueError("Secure Boot recovery requires the installed backend and original MOK key material")
+    return (("/usr/bin/ergenos-secureboot", "refresh"), ("/usr/bin/ergenos-secureboot", "check", "--json"))
+
+
+def secureboot_rollback_error(current: Path, source: Path) -> str | None:
+    try:
+        configured = target_secureboot_configured(current)
+        source_configured = target_secureboot_configured(source)
+        if configured != source_configured:
+            return "Secure Boot configuration differs: choose a snapshot from the same Secure Boot setup"
+        if configured:
+            secureboot_recovery_commands(current)
+            secureboot_recovery_commands(source)
+            for name in ("MOK.cer", "MOK.crt", "MOK.key"):
+                relative = "var/lib/ergenos/secureboot/keys/" + name
+                if (current / relative).read_bytes() != (source / relative).read_bytes():
+                    return "The selected snapshot has different MOK keys; rollback was not started"
+    except (ValueError, OSError) as error:
+        return str(error)
+    return None
+
+
 def execute_repair_in_environment(
     target: str,
     dry_run: bool,
@@ -1380,6 +1442,12 @@ def execute_repair_in_environment(
     environment: RepairEnvironment,
 ) -> RepairReport:
     steps = needed_repair_steps(environment) if target == "all" else selected_repair_steps(target)
+    try:
+        signing = secureboot_recovery_commands(environment.root) if any(step.id in {"resume", "grub-snapshots"} for step in steps) else ()
+    except ValueError as error:
+        return RepairReport(target, dry_run, False, [], [], message=str(error), system_root=str(environment.root))
+    if signing:
+        steps = [*steps, RepairStep("secureboot", "Refresh and verify Secure Boot signatures", signing, reboot_required=True)]
     step_titles = [step.title for step in steps]
     if not steps:
         return RepairReport(target, dry_run, True, [], [], message="No repairs are needed", system_root=str(environment.root))
@@ -1587,6 +1655,10 @@ def execute_rollback(snapshot: int, dry_run: bool) -> RollbackReport:
         else:
             snapshot_command = ["/usr/bin/btrfs", "subvolume", "snapshot", str(source), str(staging)]
             commands.append(snapshot_command)
+        if top_result is None:
+            secureboot_error = secureboot_rollback_error(current_root, source)
+            if secureboot_error:
+                top_result = RollbackReport(snapshot, dry_run, False, source_relative, message=secureboot_error)
         if top_result is None and dry_run:
             top_result = RollbackReport(
                 snapshot,
@@ -1645,11 +1717,19 @@ def execute_rollback(snapshot: int, dry_run: bool) -> RollbackReport:
         return RollbackReport(snapshot, False, False, source_relative, root_subvolume, preserved_relative, commands, message=f"Root was switched, but the restored system could not be mounted: {preparation_error}")
     boot_error: str | None = None
     try:
+        try:
+            signing = secureboot_recovery_commands(environment.root)
+        except ValueError as error:
+            signing = ()
+            boot_error = str(error)
         for inner_command in (
             ("/usr/bin/mkinitcpio", "-P"),
             ("/usr/bin/grub-mkconfig", "-o", "/boot/grub/grub.cfg"),
             ("/etc/grub.d/41_snapshots-btrfs",),
+            *signing,
         ):
+            if boot_error:
+                break
             command = command_for_environment(inner_command, environment)
             commands.append(command)
             code, output, command_error = run_repair_command(command)
@@ -1901,6 +1981,16 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="ergenctl", description="ErgenOS diagnostics and repair tool")
     parser.add_argument("--version", action="version", version=f"%(prog)s {VERSION}")
     subparsers = parser.add_subparsers(dest="command", required=True)
+    secureboot = subparsers.add_parser("secureboot", help="manage Secure Boot using ErgenOS-SecureBoot")
+    sb_commands = secureboot.add_subparsers(dest="secureboot_action", required=True)
+    for action in ("status", "check", "enable", "finalize", "refresh", "remove-mok", "disable"):
+        child = sb_commands.add_parser(action)
+        if action in {"status", "check"}:
+            child.add_argument("--json", action="store_true", dest="as_json")
+        if action == "enable":
+            child.add_argument("--dry-run", action="store_true")
+        if action == "disable":
+            child.add_argument("--keep-mok", action="store_true")
     status = subparsers.add_parser("status", help="show the current ErgenOS recovery state")
     status.add_argument("--json", action="store_true", dest="as_json", help="emit machine-readable JSON")
     doctor = subparsers.add_parser("doctor", help="run extended read-only ErgenOS diagnostics")
@@ -1942,6 +2032,19 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv: Sequence[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
+    if args.command == "secureboot":
+        command = ["/usr/bin/ergenos-secureboot", args.secureboot_action]
+        for attribute, flag in (("as_json", "--json"), ("dry_run", "--dry-run"), ("keep_mok", "--keep-mok")):
+            if getattr(args, attribute, False):
+                command.append(flag)
+        if args.secureboot_action not in {"status", "check"} and (live_environment_detected() or snapshot_boot_detected()[0]):
+            print("Configure Secure Boot from the normal installed system.", file=sys.stderr)
+            return 1
+        try:
+            return subprocess.run(command, check=False).returncode
+        except FileNotFoundError:
+            print("Install ergenos-secureboot first.", file=sys.stderr)
+            return 127
     if args.command == "status":
         checks = collect_checks()
         if args.as_json:
