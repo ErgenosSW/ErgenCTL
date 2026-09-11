@@ -48,6 +48,8 @@ When started from a snapshot, ErgenCTL mounts the real base installation and per
 - Rebuilding of resume configuration, initramfs and GRUB
 - Restoration of the base `@` subvolume from a selected Snapper snapshot
 - Preservation of the replaced root subvolume for manual recovery
+- Guided Secure Boot setup, verification, maintenance and removal through
+  `ergenos-secureboot`
 
 ## Requirements
 
@@ -206,20 +208,12 @@ python3 -m unittest discover -s tests -v
 
 The recovery and rollback paths have also been tested in a QEMU/KVM ErgenOS installation. The integration test covered a non-booting base system, startup from a GRUB snapshot, restoration of the root subvolume and a successful normal boot after recovery.
 
-## Project status
-
-ErgenCTL 1.0 supports the tested ErgenOS Btrfs and Snapper layout. Other distributions and custom storage layouts are not supported repair targets.
-
-## License
-
-ErgenCTL is licensed under the GNU General Public License v3.0. See [LICENSE](LICENSE).
-
-
-## Secure Boot GUI (development)
+## Secure Boot
 
 The top bar has **Repair** (all existing recovery tools) and **Secure Boot**.
 The Secure Boot page requires `ergenos-secureboot` with GUI protocol 1
-(0.2.0.dev or later). Install the backend through ErgenPac if it is missing.
+(0.2.0.dev or later). If the backend is missing, ErgenCTL offers a shortcut to
+install it through ErgenPac.
 
 1. Open Secure Boot and select **Check readiness**.
 2. Select **Set up Secure Boot** and enter a one-time MOK password twice.
@@ -228,8 +222,8 @@ The Secure Boot page requires `ergenos-secureboot` with GUI protocol 1
 4. Reboot through **ErgenOS Secure Boot**, choose **Enroll MOK** in MokManager
    and enter the same one-time password. Enable Secure Boot in firmware using
    the standard keys, then boot the Secure Boot entry again.
-5. Return to the page and select **Check status**. The checklist shows which
-   steps are complete and whether Secure Boot is active.
+5. Return to the page and select **Check status**. Nine separate checks show
+   what is complete and whether Secure Boot is active.
 
 **THE MOK PASSWORD IS USED ONLY ONCE** — the password authorizes this enrollment in
 MokManager. It is not needed at subsequent boots or updates. Removing the MOK
@@ -241,24 +235,13 @@ they are never included in command arguments, logs or saved configuration.
 The GUI preserves Repair results when switching tabs and prevents concurrent
 operations. Configure only from the normal installed ErgenOS session.
 
-Repairs that regenerate boot configuration now refresh and check Secure Boot
+Repairs that regenerate boot configuration refresh and check Secure Boot
 signatures. Rollback rejects snapshots with missing or different MOK setup
 before replacing the root. EFI and firmware state are not restored by a root
-snapshot. Firmware boot validation of this development integration is still
-required before a stable release.
+snapshot.
 
 CLI access is also available: `sudo ergenctl secureboot status --json`,
 `enable --dry-run`, `enable`, `finalize`, `refresh`, `remove-mok`, and `disable`.
-
-GUI smoke test in a graphical session: `python tests/gui_smoke.py`. It uses
-a temporary window and fake password; it never configures Secure Boot.
-
-
-### Guided Secure Boot page
-
-Check status displays nine individual checks, each marked Done, Pending,
-Needs attention or Not checked, with a readable explanation. Kernel signatures
-are not marked complete before the backend checks a configured system.
 
 The next-step card guides users through readiness, preparation, MokManager
 enrollment and firmware activation. After restarting, use Check status again;
@@ -271,3 +254,16 @@ explains that it rebuilds/signs GRUB, kernels and DKMS modules with the existing
 key, and when to use it. Key removal and finishing disablement are shown only
 when relevant to the detected state. Repair functions and the MOK password
 transport are unchanged by this UI revision.
+
+GUI smoke test in a graphical session: `python tests/gui_smoke.py`. It uses
+a temporary window and fake password; it never configures Secure Boot.
+
+## Project status
+
+ErgenCTL 1.1 development packages include the guided Secure Boot integration.
+Recovery targets remain limited to the tested ErgenOS Btrfs and Snapper layout;
+other distributions and custom storage layouts are not supported.
+
+## License
+
+ErgenCTL is licensed under the GNU General Public License v3.0. See [LICENSE](LICENSE).
