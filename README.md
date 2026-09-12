@@ -206,7 +206,11 @@ Run the test suite with:
 python3 -m unittest discover -s tests -v
 ```
 
-The recovery and rollback paths have also been tested in a QEMU/KVM ErgenOS installation. The integration test covered a non-booting base system, startup from a GRUB snapshot, restoration of the root subvolume and a successful normal boot after recovery.
+The recovery and rollback paths have been tested both in QEMU/KVM and on a
+physical Lenovo ThinkPad. The physical integration test used Secure Boot, an
+intentionally unbootable normal system, startup from the signed GRUB snapshot
+menu, restoration of the root subvolume in ErgenCTL and a successful normal
+boot after recovery.
 
 ## Secure Boot
 
