@@ -13,9 +13,11 @@ from unittest.mock import patch
 
 from ergenctl_gui_core import (
     COMMANDS,
+    bootloader_recovery_command,
     compact_log_message,
     format_json_output,
     is_kernel_trace_fragment,
+    live_iso_detected,
     log_command,
     repair_plan_can_execute,
     rollback_command,
@@ -41,6 +43,34 @@ class GuiCommandTests(unittest.TestCase):
             COMMANDS["repair"].argv(),
             ["pkexec", "ergenctl", "fix", "all", "--yes", "--json"],
         )
+
+    def test_bootloader_repair_uses_dedicated_privileged_command(self) -> None:
+        self.assertEqual(
+            COMMANDS["bootloader-repair"].argv(),
+            ["pkexec", "ergenctl", "fix", "bootloader", "--yes", "--json"],
+        )
+
+    def test_live_bootloader_repair_targets_mounted_installation(self) -> None:
+        self.assertEqual(
+            bootloader_recovery_command("/mnt/ergenos", execute=True).argv(),
+            ["pkexec", "ergenctl", "fix", "bootloader", "--root", "/mnt/ergenos", "--yes", "--json"],
+        )
+        self.assertIn("--dry-run", bootloader_recovery_command("/mnt/ergenos").argv())
+        with self.assertRaises(ValueError):
+            bootloader_recovery_command("/")
+
+    def test_live_iso_detection_uses_archiso_marker_or_kernel_argument(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            marker = root / "archiso"
+            cmdline = root / "cmdline"
+            cmdline.write_text("quiet")
+            self.assertFalse(live_iso_detected(marker, cmdline))
+            marker.mkdir()
+            self.assertTrue(live_iso_detected(marker, cmdline))
+            marker.rmdir()
+            cmdline.write_text("quiet archisobasedir=arch")
+            self.assertTrue(live_iso_detected(marker, cmdline))
 
     def test_local_python_launcher_can_be_used(self) -> None:
         self.assertEqual(
@@ -447,6 +477,17 @@ class ResumeTests(unittest.TestCase):
 
 
 class RepairTests(unittest.TestCase):
+    def make_snapshot_menu_tree(self, root: Path, recursive: bool = True) -> None:
+        (root / "boot/grub").mkdir(parents=True)
+        (root / ".snapshots/13/snapshot").mkdir(parents=True)
+        (root / "etc/systemd/system/grub-btrfsd.service.d").mkdir(parents=True)
+        (root / "boot/grub/grub.cfg").write_text("source $prefix/grub-btrfs.cfg\n")
+        (root / "boot/grub/grub-btrfs.cfg").write_text("menuentry '@snapshots/13/snapshot' {}\n")
+        command = "/usr/bin/grub-btrfsd --syslog --recursive /.snapshots" if recursive else "/usr/bin/grub-btrfsd --syslog /.snapshots"
+        (root / "etc/systemd/system/grub-btrfsd.service.d/override.conf").write_text(
+            f"[Service]\nExecStart=\nExecStart={command}\n"
+        )
+
     def test_all_repair_uses_safe_order(self) -> None:
         steps = ergenctl.selected_repair_steps("all")
 
@@ -455,6 +496,80 @@ class RepairTests(unittest.TestCase):
             ["repositories", "pacman-hooks", "services", "resume", "grub-snapshots"],
         )
         self.assertEqual(steps[-1].commands, (("/etc/grub.d/41_snapshots-btrfs",),))
+
+    def test_bootloader_rebuilds_snapshot_menu_before_main_grub_config(self) -> None:
+        commands = ergenctl.REPAIR_STEPS["bootloader"].commands
+
+        self.assertLess(commands.index(("/etc/grub.d/41_snapshots-btrfs",)), commands.index(("/usr/bin/grub-mkconfig", "-o", "/boot/grub/grub.cfg")))
+        self.assertTrue(any(command[0] == "/usr/bin/grub-install" for command in commands))
+
+    def test_bootloader_validation_requires_normal_efi_loader(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self.make_snapshot_menu_tree(root)
+            (root / "boot/vmlinuz-linux-zen").touch()
+            (root / "boot/initramfs-linux-zen.img").touch()
+
+            result = ergenctl.bootloader_validation(root)
+
+        self.assertEqual(result.status, "fail")
+        self.assertIn("EFI loader", result.summary)
+
+    def test_boot_backup_can_restore_previous_grub_configuration(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            current = root / "boot/grub/grub.cfg"
+            backup = root / "var/lib/ergenctl/backups/test/boot/grub/grub.cfg"
+            current.parent.mkdir(parents=True)
+            backup.parent.mkdir(parents=True)
+            current.write_text("broken\n")
+            backup.write_text("working\n")
+
+            error = ergenctl.restore_configuration_backup("/var/lib/ergenctl/backups/test", root)
+
+            self.assertIsNone(error)
+            self.assertEqual(current.read_text(), "working\n")
+
+    def test_snapshot_validation_requires_existing_snapshot_in_menu(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self.make_snapshot_menu_tree(root)
+            (root / "boot/grub/grub-btrfs.cfg").write_text("# empty menu\n")
+
+            result = ergenctl.grub_snapshot_menu_validation(root)
+
+        self.assertEqual(result.status, "fail")
+        self.assertIn("absent", result.summary)
+
+    def test_snapshot_validation_requires_main_config_to_load_menu(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self.make_snapshot_menu_tree(root)
+            (root / "boot/grub/grub.cfg").write_text("menuentry 'ErgenOS' {}\n")
+
+            result = ergenctl.grub_snapshot_menu_validation(root)
+
+        self.assertEqual(result.status, "fail")
+        self.assertIn("does not load", result.summary)
+
+    def test_snapshot_validation_requires_recursive_daemon(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self.make_snapshot_menu_tree(root, recursive=False)
+
+            result = ergenctl.grub_snapshot_menu_validation(root)
+
+        self.assertEqual(result.status, "fail")
+        self.assertIn("recursive", result.summary)
+
+    def test_snapshot_validation_accepts_secure_boot_safe_menu(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self.make_snapshot_menu_tree(root)
+
+            result = ergenctl.grub_snapshot_menu_validation(root)
+
+        self.assertEqual(result.status, "pass")
 
     def test_preflight_allows_repair_of_mounted_base_system(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -623,6 +738,7 @@ class RepairTests(unittest.TestCase):
             patch.object(ergenctl, "repair_preflight", return_value=None),
             patch.object(ergenctl, "backup_configuration", return_value="/backup"),
             patch.object(ergenctl, "run_repair_command", return_value=(0, "", "")) as run_mock,
+            patch.object(ergenctl, "run_internal_repair", return_value=(True, "configured")),
             patch.object(ergenctl, "validate_repair_step", return_value=validation),
         ):
             report = ergenctl.execute_repair("services", dry_run=False, create_snapshot=False)
@@ -635,6 +751,7 @@ class RepairTests(unittest.TestCase):
         with (
             patch.object(ergenctl, "repair_preflight", return_value=None),
             patch.object(ergenctl, "backup_configuration", return_value=None),
+            patch.object(ergenctl, "run_internal_repair", return_value=(True, "configured")),
             patch.object(ergenctl, "run_repair_command", return_value=(1, "", "failed")) as run_mock,
         ):
             report = ergenctl.execute_repair("services", dry_run=False, create_snapshot=False)
@@ -644,7 +761,10 @@ class RepairTests(unittest.TestCase):
         self.assertIn("failed", report.message)
 
     def test_services_validation_checks_daemon_and_cleanup_timer(self) -> None:
-        with patch.object(ergenctl, "run", return_value=(0, "", "")) as run_mock:
+        with (
+            patch.object(ergenctl, "run", return_value=(0, "", "")) as run_mock,
+            patch.object(ergenctl, "grub_btrfsd_is_recursive", return_value=True),
+        ):
             result = ergenctl.validate_repair_step(ergenctl.REPAIR_STEPS["services"])
 
         self.assertEqual(result.status, "pass")

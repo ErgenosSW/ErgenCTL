@@ -22,9 +22,11 @@ if installed_module_directory.is_dir():
 from ergenctl_gui_core import (
     COMMANDS,
     GuiCommand,
+    bootloader_recovery_command,
     compact_log_message,
     format_json_output,
     is_kernel_trace_fragment,
+    live_iso_detected,
     log_command,
     repair_plan_can_execute,
     rollback_command,
@@ -45,6 +47,7 @@ class ErgenCTLWindow(Adw.ApplicationWindow):
         self.selected_snapshot: int | None = None
         self.repair_plan_ready = False
         self.operation_busy = False
+        self.live_iso = live_iso_detected()
         self.connect("close-request", self._close_requested)
 
         toolbar = Adw.ToolbarView()
@@ -101,6 +104,14 @@ class ErgenCTLWindow(Adw.ApplicationWindow):
         actions.append(logs_button)
         self._add_action(actions, "Plan repairs", "Show changes without applying them", "repair-plan")
 
+        self.bootloader_button = Gtk.Button(
+            label="Recover installed bootloader",
+            tooltip_text="Available from ErgenOS Live ISO for a mounted installation",
+        )
+        self.bootloader_button.connect("clicked", self._confirm_bootloader_repair)
+        self.bootloader_button.set_visible(self.live_iso)
+        actions.append(self.bootloader_button)
+
         self.repair_button = Gtk.Button(
             label="Repair system",
             tooltip_text="Run Check system first",
@@ -126,8 +137,12 @@ class ErgenCTLWindow(Adw.ApplicationWindow):
         split.set_content(content)
 
         self.status = Adw.StatusPage(
-            title="Ready",
-            description="Choose an action to inspect or repair this system.",
+            title="Live recovery" if self.live_iso else "Ready",
+            description=(
+                "Mount an installed ErgenOS system, then recover its bootloader."
+                if self.live_iso
+                else "Choose an action to inspect or repair this system."
+            ),
             icon_name="system-search-symbolic",
         )
         content.append(self.status)
@@ -193,6 +208,42 @@ class ErgenCTLWindow(Adw.ApplicationWindow):
         dialog.set_default_response("cancel")
         dialog.set_close_response("cancel")
         dialog.connect("response", lambda _dialog, response: self._run(COMMANDS["repair"]) if response == "repair" else None)
+        dialog.present(self)
+
+    def _confirm_bootloader_repair(self, _button: Gtk.Button) -> None:
+        if not self.live_iso:
+            return
+        root = Adw.EntryRow(title="Mounted ErgenOS root")
+        root.set_text("/mnt/ergenos")
+        options = Gtk.ListBox(selection_mode=Gtk.SelectionMode.NONE)
+        options.add_css_class("boxed-list")
+        options.append(root)
+        dialog = Adw.AlertDialog(
+            heading="Recover the installed bootloader",
+            body=(
+                "Select the mounted ErgenOS root. ErgenCTL will back up /boot, rebuild GRUB and "
+                "the snapshot menu, restore the Secure Boot entry and verify the result."
+            ),
+        )
+        dialog.set_extra_child(options)
+        dialog.add_response("cancel", "Cancel")
+        dialog.add_response("plan", "Show plan")
+        dialog.add_response("repair", "Repair bootloader")
+        dialog.set_response_appearance("repair", Adw.ResponseAppearance.SUGGESTED)
+        dialog.set_default_response("plan")
+        dialog.set_close_response("cancel")
+
+        def respond(_dialog: Adw.AlertDialog, response: str) -> None:
+            if response not in {"plan", "repair"}:
+                return
+            try:
+                command = bootloader_recovery_command(root.get_text().strip(), execute=response == "repair")
+            except ValueError as error:
+                self._show_result("Bootloader recovery", str(error), False)
+                return
+            self._run(command)
+
+        dialog.connect("response", respond)
         dialog.present(self)
 
     def _show_rollback_dialog(self, _button: Gtk.Button) -> None:
@@ -377,8 +428,12 @@ class ErgenCTLWindow(Adw.ApplicationWindow):
         if command is COMMANDS["snapshots"] and isinstance(report, dict):
             self._show_snapshots(report)
             return
-        if command in (COMMANDS["repair-plan"], COMMANDS["repair"]) and isinstance(report, dict):
-            self._show_repair_report(report, command is COMMANDS["repair-plan"])
+        is_bootloader_recovery = command is not None and command.arguments[:2] == ("fix", "bootloader")
+        if (
+            command in (COMMANDS["repair-plan"], COMMANDS["repair"], COMMANDS["bootloader-repair"])
+            or is_bootloader_recovery
+        ) and isinstance(report, dict):
+            self._show_repair_report(report, "--dry-run" in command.arguments)
             return
         if isinstance(report, dict):
             result = report.get("message") or ("Operation completed" if report.get("success", success) else "Operation failed")

@@ -130,6 +130,7 @@ sudo ergenctl resume --json
 
 Supported repair targets:
 
+- `bootloader`
 - `repositories`
 - `pacman-hooks`
 - `services`
@@ -150,6 +151,43 @@ sudo ergenctl fix all --yes
 ```
 
 Without `--yes`, ErgenCTL asks for confirmation. By default, it creates a safety snapshot before changing a recoverable Btrfs installation. The `--no-snapshot` option disables that protection and should be used only when another verified backup exists.
+
+### Bootloader recovery
+
+The dedicated bootloader repair backs up `/boot`, rebuilds initramfs, regenerates
+the dynamic GRUB snapshot menu before the main GRUB configuration and refreshes
+the signed GRUB image when Secure Boot is configured:
+
+```bash
+sudo ergenctl fix bootloader --dry-run
+sudo ergenctl fix bootloader --yes
+```
+
+The operation succeeds only when the rebuilt `grub.cfg` loads
+`grub-btrfs.cfg`, existing snapshots are present in that menu and
+`grub-btrfsd` uses recursive monitoring. This prevents a signed Secure Boot
+GRUB rebuild from silently losing **ErgenOS Snapshots**.
+
+From ErgenOS Live media, temporarily disable Secure Boot, mount the installed
+root filesystem at `/mnt`, and point ErgenCTL at it. Entries for `/boot`,
+`/boot/efi` and `/.snapshots` are mounted from the installed system's `fstab`:
+
+```bash
+sudo ergenctl fix bootloader --root /mnt --dry-run
+sudo ergenctl fix bootloader --root /mnt --yes
+```
+
+The graphical **Recover installed bootloader** action is shown only when
+ErgenCTL is running from ErgenOS Live media. It accepts the mounted installation
+path (by default `/mnt/ergenos`) and offers a dry-run plan before applying the
+same recovery workflow.
+
+The selected root must contain an ErgenOS installation. Existing MOK key
+material remains in the installed system and is used to rebuild and verify the
+signed GRUB and verify the existing kernel signatures; private keys are never
+copied to the EFI partition. Bootloader recovery deliberately does not rebuild
+unrelated DKMS modules, so it remains usable when a broken kernel update left
+headers unavailable.
 
 ## Rollback from a snapshot
 

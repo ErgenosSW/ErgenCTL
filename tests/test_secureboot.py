@@ -73,7 +73,7 @@ class RecoveryTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 ctl.secureboot_recovery_commands(root)
 
-    def test_refresh_then_check_in_repair_dry_run(self):
+    def test_refresh_grub_then_check_in_repair_dry_run(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             self.setup_root(root)
@@ -82,9 +82,16 @@ class RecoveryTests(unittest.TestCase):
                 report = ctl.execute_repair_in_environment('resume', True, False, environment)
             self.assertTrue(report.success)
             self.assertEqual(report.executed_commands[-2:], [
-                ['/usr/bin/ergenos-secureboot', 'refresh'],
+                ['/usr/bin/ergenos-secureboot', 'refresh-grub'],
                 ['/usr/bin/ergenos-secureboot', 'check', '--json'],
             ])
+
+    def test_full_secureboot_refresh_remains_available_for_rollback(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self.setup_root(root)
+            self.assertEqual(ctl.secureboot_recovery_commands(root)[0],
+                             ('/usr/bin/ergenos-secureboot', 'refresh'))
 
     def test_missing_backend_blocks_signing(self):
         with tempfile.TemporaryDirectory() as directory:

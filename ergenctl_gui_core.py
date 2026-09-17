@@ -6,6 +6,7 @@ from __future__ import annotations
 import json
 import re
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Sequence
 
 
@@ -31,6 +32,8 @@ COMMANDS = {
     "resume": GuiCommand("Hibernation", ("resume", "--json")),
     "repair-plan": GuiCommand("Repair plan", ("fix", "all", "--dry-run", "--json"), True),
     "repair": GuiCommand("Repair system", ("fix", "all", "--yes", "--json"), True),
+    "bootloader-plan": GuiCommand("Bootloader repair plan", ("fix", "bootloader", "--dry-run", "--json"), True),
+    "bootloader-repair": GuiCommand("Repair bootloader", ("fix", "bootloader", "--yes", "--json"), True),
 }
 
 LOG_CATEGORIES = ("all", "resume", "boot", "audio", "graphics")
@@ -56,6 +59,28 @@ def rollback_command(snapshot: int, execute: bool = False) -> GuiCommand:
     mode = "--yes" if execute else "--dry-run"
     title = "Rollback" if execute else "Rollback plan"
     return GuiCommand(title, ("rollback", str(snapshot), mode, "--json"), True)
+
+
+def bootloader_recovery_command(root: str, execute: bool = False) -> GuiCommand:
+    path = Path(root)
+    if not path.is_absolute() or path == Path("/"):
+        raise ValueError("recovery root must be an absolute mounted path other than /")
+    mode = "--yes" if execute else "--dry-run"
+    title = "Repair bootloader" if execute else "Bootloader repair plan"
+    return GuiCommand(
+        title,
+        ("fix", "bootloader", "--root", str(path), mode, "--json"),
+        True,
+    )
+
+
+def live_iso_detected(run_archiso: Path = Path("/run/archiso"), cmdline: Path = Path("/proc/cmdline")) -> bool:
+    if run_archiso.exists():
+        return True
+    try:
+        return "archisobasedir=" in cmdline.read_text()
+    except OSError:
+        return False
 
 
 def format_json_output(output: str) -> str:

@@ -112,8 +112,8 @@ class RollbackReport:
     message: str | None = None
 
 
-REPAIR_TARGETS = ("grub-snapshots", "pacman-hooks", "services", "resume", "repositories", "all")
-BTRFS_REPAIR_TARGETS = {"grub-snapshots", "pacman-hooks", "services"}
+REPAIR_TARGETS = ("bootloader", "grub-snapshots", "pacman-hooks", "services", "resume", "repositories", "all")
+BTRFS_REPAIR_TARGETS = {"bootloader", "grub-snapshots", "pacman-hooks", "services"}
 
 REPAIR_STEPS = {
     "repositories": RepairStep(
@@ -135,6 +135,7 @@ REPAIR_STEPS = {
             ("/usr/bin/systemctl", "enable", "--now", "grub-btrfsd.service"),
             ("/usr/bin/systemctl", "enable", "--now", "snapper-cleanup.timer"),
         ),
+        internal_actions=("configure-grub-btrfsd-recursive",),
     ),
     "resume": RepairStep(
         "resume",
@@ -152,6 +153,26 @@ REPAIR_STEPS = {
         "Regenerate the GRUB snapshot menu",
         (("/etc/grub.d/41_snapshots-btrfs",),),
         ("/boot/grub/grub-btrfs.cfg",),
+    ),
+    "bootloader": RepairStep(
+        "bootloader",
+        "Rebuild the kernel, GRUB and snapshot boot menu",
+        (
+            ("/usr/bin/systemctl", "enable", "--now", "grub-btrfsd.service"),
+            (
+                "/usr/bin/grub-install",
+                "--target=x86_64-efi",
+                "--efi-directory=/boot/efi",
+                "--bootloader-id=ErgenOS",
+                "--recheck",
+            ),
+            ("/usr/bin/mkinitcpio", "-P"),
+            ("/etc/grub.d/41_snapshots-btrfs",),
+            ("/usr/bin/grub-mkconfig", "-o", "/boot/grub/grub.cfg"),
+        ),
+        ("/boot", "/etc/systemd/system/grub-btrfsd.service.d/override.conf"),
+        True,
+        ("configure-grub-btrfsd-recursive",),
     ),
 }
 LOG_CATEGORY_PATTERNS = {
@@ -1022,6 +1043,38 @@ def prepare_repair_environment(dry_run: bool) -> tuple[RepairEnvironment | None,
     return environment, None
 
 
+def prepare_explicit_repair_environment(
+    requested_root: Path,
+    dry_run: bool,
+) -> tuple[RepairEnvironment | None, str | None]:
+    """Prepare an already mounted ErgenOS installation, primarily from live media."""
+    root = requested_root.resolve()
+    if root == Path("/"):
+        return RepairEnvironment(), None
+    if not root.is_dir():
+        return None, f"Recovery root does not exist: {root}"
+    if read_os_release_file(root / "etc/os-release").get("ID") != "ergenos":
+        return None, f"The selected recovery root is not ErgenOS: {root}"
+    if os.geteuid() != 0:
+        return None, "Root privileges are required to access the mounted installation. Run this command with sudo."
+
+    environment = RepairEnvironment(root, True)
+    entries = sorted(fstab_entries(root / "etc/fstab"), key=lambda item: item[1].count("/"))
+    for source, mountpoint, fstype, options in entries:
+        if mountpoint not in {"/.snapshots", "/boot", "/boot/efi"} or "noauto" in options.split(","):
+            continue
+        target = root / mountpoint.lstrip("/")
+        if existing_mount_source(str(target)):
+            continue
+        resolved = resolve_resume_device(source) or source
+        error = mount_recovery_filesystem(resolved, target, fstype, options, dry_run)
+        if error:
+            cleanup_repair_environment(environment)
+            return None, f"Could not mount {mountpoint} for recovery: {error}"
+        environment.mounted_paths.append(target)
+    return environment, None
+
+
 def cleanup_repair_environment(environment: RepairEnvironment) -> str | None:
     errors = []
     for path in reversed(environment.mounted_paths):
@@ -1125,7 +1178,7 @@ def repair_preflight(
     release = read_os_release() if environment.root == Path("/") else read_os_release_file(environment.root / "etc/os-release")
     if release.get("ID") != "ergenos":
         return "Repairs are available only on ErgenOS"
-    if live_environment_detected():
+    if live_environment_detected() and not environment.recovery:
         return "Repairs are disabled in the live environment"
     root_fstype = "btrfs" if environment.recovery else root_filesystem_type()
     if any(step.id in BTRFS_REPAIR_TARGETS for step in steps) and root_fstype != "btrfs":
@@ -1253,6 +1306,24 @@ def run_internal_repair(action: str, root: Path = Path("/")) -> tuple[bool, str]
             root / "etc/default/grub",
             root / "etc/fstab",
         )
+    if action == "configure-grub-btrfsd-recursive":
+        override = root / "etc/systemd/system/grub-btrfsd.service.d/override.conf"
+        content = (
+            "[Service]\n"
+            "ExecStart=\n"
+            "ExecStart=/usr/bin/grub-btrfsd --syslog --recursive /.snapshots\n"
+        )
+        try:
+            override.parent.mkdir(parents=True, exist_ok=True)
+            if override.is_file() and override.read_text(encoding="utf-8") == content:
+                return True, "grub-btrfsd already uses recursive monitoring"
+            temporary = override.with_name(f".{override.name}.ergenctl-{os.getpid()}")
+            temporary.write_text(content, encoding="utf-8")
+            os.chmod(temporary, 0o644)
+            os.replace(temporary, override)
+        except OSError as error:
+            return False, f"Could not configure recursive snapshot monitoring: {error}"
+        return True, "grub-btrfsd recursive monitoring configured"
     return False, f"Unknown internal repair action: {action}"
 
 
@@ -1262,7 +1333,7 @@ def backup_configuration(steps: list[RepairStep], root: Path = Path("/")) -> str
             root / path.lstrip("/")
             for step in steps
             for path in step.backup_paths
-            if (root / path.lstrip("/")).is_file()
+            if (root / path.lstrip("/")).exists()
         }
     )
     if not paths:
@@ -1274,8 +1345,22 @@ def backup_configuration(steps: list[RepairStep], root: Path = Path("/")) -> str
     for source in paths:
         destination = backup_directory / source.relative_to(root)
         destination.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(source, destination)
+        if source.is_dir():
+            shutil.copytree(source, destination, symlinks=True)
+        else:
+            shutil.copy2(source, destination)
     return str(Path("/") / backup_directory.relative_to(root))
+
+
+def restore_configuration_backup(backup_directory: str, root: Path = Path("/")) -> str | None:
+    source = root / backup_directory.lstrip("/")
+    if not source.is_dir():
+        return f"backup directory is missing: {source}"
+    try:
+        shutil.copytree(source, root, dirs_exist_ok=True, symlinks=True)
+    except OSError as error:
+        return str(error)
+    return None
 
 
 def run_repair_command(command: Sequence[str]) -> tuple[int, str, str]:
@@ -1351,6 +1436,87 @@ def create_safety_snapshot(
     return number, None, command
 
 
+def snapshot_numbers_on_disk(root: Path) -> set[int]:
+    snapshots = root / ".snapshots"
+    if not snapshots.is_dir():
+        return set()
+    return {
+        int(entry.name)
+        for entry in snapshots.iterdir()
+        if entry.name.isdigit() and (entry / "snapshot").is_dir()
+    }
+
+
+def grub_btrfsd_is_recursive(root: Path) -> bool:
+    unit_files = [root / "usr/lib/systemd/system/grub-btrfsd.service"]
+    drop_in = root / "etc/systemd/system/grub-btrfsd.service.d"
+    if drop_in.is_dir():
+        unit_files.extend(sorted(drop_in.glob("*.conf")))
+    active_exec: list[str] = []
+    for path in unit_files:
+        if not path.is_file():
+            continue
+        for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
+            stripped = line.strip()
+            if not stripped.startswith("ExecStart="):
+                continue
+            command = stripped.partition("=")[2].strip()
+            if not command:
+                active_exec.clear()
+            else:
+                active_exec.append(command)
+    return any(("--recursive" in command or re.search(r"(?:^|\s)-r(?:\s|$)", command)) for command in active_exec)
+
+
+def grub_snapshot_menu_validation(root: Path) -> Check:
+    main_config = root / "boot/grub/grub.cfg"
+    snapshot_config = root / "boot/grub/grub-btrfs.cfg"
+    try:
+        main_content = main_config.read_text(encoding="utf-8", errors="replace")
+        snapshot_content = snapshot_config.read_text(encoding="utf-8", errors="replace")
+    except OSError as error:
+        return Check("grub-snapshots", "GRUB snapshot menu", "fail", "snapshot menu configuration is missing", str(error))
+
+    if "grub-btrfs.cfg" not in main_content:
+        return Check("grub-snapshots", "GRUB snapshot menu", "fail", "grub.cfg does not load grub-btrfs.cfg", str(main_config))
+
+    available = snapshot_numbers_on_disk(root)
+    menu_numbers = {int(number) for number in re.findall(r"@snapshots/(\d+)/snapshot", snapshot_content)}
+    if available and not menu_numbers.intersection(available):
+        return Check(
+            "grub-snapshots",
+            "GRUB snapshot menu",
+            "fail",
+            "existing snapshots are absent from the GRUB menu",
+            f"snapshots={sorted(available)}, menu={sorted(menu_numbers)}",
+        )
+    if not grub_btrfsd_is_recursive(root):
+        return Check(
+            "grub-snapshots",
+            "GRUB snapshot menu",
+            "fail",
+            "grub-btrfsd is not configured for recursive snapshot monitoring",
+        )
+    summary = f"menu contains {len(menu_numbers)} snapshot(s)" if menu_numbers else "menu is ready; no snapshots currently exist"
+    return Check("grub-snapshots", "GRUB snapshot menu", "pass", summary, str(snapshot_config))
+
+
+def bootloader_validation(root: Path) -> Check:
+    kernels = sorted((root / "boot").glob("vmlinuz-*"))
+    initramfs = sorted((root / "boot").glob("initramfs-*.img"))
+    if not kernels:
+        return Check("bootloader", "Bootloader", "fail", "no kernel image exists in /boot")
+    if not initramfs:
+        return Check("bootloader", "Bootloader", "fail", "no initramfs image exists in /boot")
+    normal_grub = root / "boot/efi/EFI/ErgenOS/grubx64.efi"
+    if not normal_grub.is_file():
+        return Check("bootloader", "Bootloader", "fail", "normal ErgenOS EFI loader is missing", str(normal_grub))
+    snapshots = grub_snapshot_menu_validation(root)
+    if snapshots.status != "pass":
+        return Check("bootloader", "Bootloader", "fail", snapshots.summary, snapshots.evidence)
+    return Check("bootloader", "Bootloader", "pass", "kernel, initramfs, GRUB and snapshot menu validated")
+
+
 def validate_repair_step(
     step: RepairStep,
     environment: RepairEnvironment | None = None,
@@ -1358,14 +1524,9 @@ def validate_repair_step(
     environment = environment or RepairEnvironment()
     root = environment.root
     if step.id == "grub-snapshots":
-        path = root / "boot/grub/grub-btrfs.cfg"
-        return Check(
-            step.id,
-            step.title,
-            "pass" if path.is_file() else "fail",
-            "snapshot menu generated" if path.is_file() else "snapshot menu is still missing",
-            str(path),
-        )
+        return grub_snapshot_menu_validation(root)
+    if step.id == "bootloader":
+        return bootloader_validation(root)
     if step.id == "pacman-hooks":
         if environment.recovery:
             return Check(step.id, step.title, "pass" if target_has_pacman_hooks(root) else "fail", "hooks installed" if target_has_pacman_hooks(root) else "hooks are still missing")
@@ -1379,11 +1540,14 @@ def validate_repair_step(
             active_code, _, _ = run(["systemctl", "is-active", "--quiet", unit])
             enabled_code, _, _ = run(["systemctl", "is-enabled", "--quiet", unit])
             states.append(active_code == 0 and enabled_code == 0)
+        recursive = grub_btrfsd_is_recursive(root)
         return Check(
             step.id,
             step.title,
-            "pass" if all(states) else "fail",
-            "snapshot service and cleanup timer active" if all(states) else "snapshot service or cleanup timer is inactive",
+            "pass" if all(states) and recursive else "fail",
+            "snapshot service uses recursive monitoring and cleanup timer is active"
+            if all(states) and recursive
+            else "snapshot service, recursive monitoring or cleanup timer is not ready",
         )
     if step.id == "repositories":
         if environment.recovery:
@@ -1407,14 +1571,15 @@ def target_secureboot_configured(root: Path) -> bool:
     return state["configured"]
 
 
-def secureboot_recovery_commands(root: Path) -> tuple[tuple[str, ...], ...]:
+def secureboot_recovery_commands(root: Path, *, grub_only: bool = False) -> tuple[tuple[str, ...], ...]:
     if not target_secureboot_configured(root):
         return ()
     for relative in ("usr/bin/ergenos-secureboot", "var/lib/ergenos/secureboot/keys/MOK.key",
                      "var/lib/ergenos/secureboot/keys/MOK.cer", "var/lib/ergenos/secureboot/keys/MOK.crt"):
         if not (root / relative).is_file():
             raise ValueError("Secure Boot recovery requires the installed backend and original MOK key material")
-    return (("/usr/bin/ergenos-secureboot", "refresh"), ("/usr/bin/ergenos-secureboot", "check", "--json"))
+    refresh_action = "refresh-grub" if grub_only else "refresh"
+    return (("/usr/bin/ergenos-secureboot", refresh_action), ("/usr/bin/ergenos-secureboot", "check", "--json"))
 
 
 def secureboot_rollback_error(current: Path, source: Path) -> str | None:
@@ -1443,7 +1608,7 @@ def execute_repair_in_environment(
 ) -> RepairReport:
     steps = needed_repair_steps(environment) if target == "all" else selected_repair_steps(target)
     try:
-        signing = secureboot_recovery_commands(environment.root) if any(step.id in {"resume", "grub-snapshots"} for step in steps) else ()
+        signing = secureboot_recovery_commands(environment.root, grub_only=True) if any(step.id in {"bootloader", "resume", "grub-snapshots"} for step in steps) else ()
     except ValueError as error:
         return RepairReport(target, dry_run, False, [], [], message=str(error), system_root=str(environment.root))
     if signing:
@@ -1493,6 +1658,14 @@ def execute_repair_in_environment(
                 message=snapshot_error,
             )
 
+    def failure_with_boot_restore(message: str) -> str:
+        if not any(step.id == "bootloader" for step in steps) or not backup_directory:
+            return message
+        restore_error = restore_configuration_backup(backup_directory, environment.root)
+        if restore_error:
+            return f"{message}; boot backup restoration failed: {restore_error}"
+        return f"{message}; the previous boot files were restored from {backup_directory}"
+
     for step in steps:
         for action in step.internal_actions:
             success, message = run_internal_repair(action, environment.root)
@@ -1507,7 +1680,7 @@ def execute_repair_in_environment(
                     backup_directory,
                     safety_snapshot,
                     any(item.reboot_required for item in steps),
-                    f"Repair step failed: {step.title}: {message}",
+                    failure_with_boot_restore(f"Repair step failed: {step.title}: {message}"),
                     executed_actions,
                 )
         for command in step.commands:
@@ -1525,7 +1698,7 @@ def execute_repair_in_environment(
                     backup_directory,
                     safety_snapshot,
                     any(item.reboot_required for item in steps),
-                    f"Repair step failed: {step.title}: {diagnostic}",
+                    failure_with_boot_restore(f"Repair step failed: {step.title}: {diagnostic}"),
                     executed_actions,
                 )
         validation = validate_repair_step(step, environment)
@@ -1539,8 +1712,28 @@ def execute_repair_in_environment(
                 backup_directory,
                 safety_snapshot,
                 any(item.reboot_required for item in steps),
-                f"Validation failed: {validation.summary}",
+                failure_with_boot_restore(f"Validation failed: {validation.summary}"),
                 executed_actions,
+            )
+
+    if any(step.id == "bootloader" for step in steps):
+        final_validation = bootloader_validation(environment.root)
+        if final_validation.status != "pass":
+            return RepairReport(
+                target,
+                False,
+                False,
+                step_titles,
+                executed,
+                backup_directory,
+                safety_snapshot,
+                True,
+                failure_with_boot_restore(
+                    f"Final boot validation failed after Secure Boot refresh: {final_validation.summary}"
+                ),
+                executed_actions,
+                str(environment.root),
+                environment.recovery,
             )
 
     return RepairReport(
@@ -1558,9 +1751,17 @@ def execute_repair_in_environment(
     )
 
 
-def execute_repair(target: str, dry_run: bool, create_snapshot: bool) -> RepairReport:
+def execute_repair(
+    target: str,
+    dry_run: bool,
+    create_snapshot: bool,
+    target_root: Path | None = None,
+) -> RepairReport:
     snapshot_boot, _ = snapshot_boot_detected()
-    environment, preparation_error = prepare_repair_environment(dry_run)
+    if target_root is not None:
+        environment, preparation_error = prepare_explicit_repair_environment(target_root, dry_run)
+    else:
+        environment, preparation_error = prepare_repair_environment(dry_run)
     if preparation_error or environment is None:
         return RepairReport(
             target,
@@ -2021,6 +2222,7 @@ def build_parser() -> argparse.ArgumentParser:
     fix.add_argument("--dry-run", action="store_true", help="show the repair plan without changing the system")
     fix.add_argument("--yes", action="store_true", help="apply the repair without an interactive confirmation")
     fix.add_argument("--no-snapshot", action="store_true", help="do not create a safety snapshot")
+    fix.add_argument("--root", type=Path, help="mounted ErgenOS root to repair, for example /mnt from live media")
     fix.add_argument("--json", action="store_true", dest="as_json", help="emit machine-readable JSON")
     rollback = subparsers.add_parser("rollback", help="restore the base system from a Snapper snapshot")
     rollback.add_argument("snapshot", type=positive_int, help="snapshot number to restore")
@@ -2084,7 +2286,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         if not args.dry_run and not args.yes and not confirm_repair(args.target):
             print("Repair cancelled. No changes were made.")
             return 2
-        report = execute_repair(args.target, args.dry_run, not args.no_snapshot)
+        report = execute_repair(args.target, args.dry_run, not args.no_snapshot, args.root)
         if args.as_json:
             print(json.dumps(repair_payload(report), indent=2, ensure_ascii=False))
         else:
