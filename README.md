@@ -36,6 +36,7 @@ When started from a snapshot, ErgenCTL mounts the real base installation and per
 - Human-readable and JSON output
 - Current and previous boot journal inspection
 - Log filtering for resume, boot, audio and graphics problems
+- Laptop dual-GPU detection with `switcheroo-control` service and GPU visibility checks
 - Btrfs and Snapper snapshot inspection
 - Detection of normal, live and snapshot boot modes
 - Hibernation resume configuration checks
@@ -63,6 +64,8 @@ ErgenCTL targets ErgenOS installations using:
 - mkinitcpio
 - arch-chroot
 - Python 3.10 or newer
+- pciutils
+- switcheroo-control on laptops with hybrid graphics
 
 Diagnostic commands can run without root privileges where system permissions allow it. Repair and rollback operations require root privileges.
 

@@ -145,6 +145,74 @@ class DistributionCheckTests(unittest.TestCase):
         self.assertEqual(result.status, "warning")
 
 
+class HybridGraphicsTests(unittest.TestCase):
+    INTEL_NVIDIA = (
+        "0000:00:02.0 VGA compatible controller: Intel Corporation Arc Graphics\n"
+        "0000:01:00.0 3D controller: NVIDIA Corporation GeForce RTX 4060 Laptop GPU\n"
+    )
+
+    def test_dual_gpu_laptop_is_ready_when_switcheroo_lists_both_gpus(self) -> None:
+        def command_result(command: list[str]) -> tuple[int, str, str]:
+            if command[:2] == ["systemctl", "is-active"]:
+                return 0, "active", ""
+            if command[:2] == ["switcherooctl", "list"]:
+                return 0, "Device: 0\n  Name: Intel\nDevice: 1\n  Name: NVIDIA", ""
+            raise AssertionError(command)
+
+        with (
+            patch.object(ergenctl.shutil, "which", return_value="/usr/bin/switcherooctl"),
+            patch.object(ergenctl, "run", side_effect=command_result),
+        ):
+            result = ergenctl.hybrid_graphics_check(10, self.INTEL_NVIDIA)
+
+        self.assertEqual(result.status, "pass")
+        self.assertIn("2 GPUs", result.summary)
+
+    def test_dual_gpu_laptop_warns_when_switcheroo_is_missing(self) -> None:
+        with patch.object(ergenctl.shutil, "which", return_value=None):
+            result = ergenctl.hybrid_graphics_check(10, self.INTEL_NVIDIA)
+
+        self.assertEqual(result.status, "warning")
+        self.assertIn("not installed", result.summary)
+
+    def test_dual_gpu_laptop_warns_when_service_is_inactive(self) -> None:
+        with (
+            patch.object(ergenctl.shutil, "which", return_value="/usr/bin/switcherooctl"),
+            patch.object(ergenctl, "run", return_value=(3, "inactive", "")),
+        ):
+            result = ergenctl.hybrid_graphics_check(10, self.INTEL_NVIDIA)
+
+        self.assertEqual(result.status, "warning")
+        self.assertIn("not active", result.summary)
+
+    def test_single_gpu_laptop_is_reported_without_warning(self) -> None:
+        result = ergenctl.hybrid_graphics_check(
+            10,
+            "0000:04:00.0 VGA compatible controller: Advanced Micro Devices, Inc. Radeon Graphics\n",
+        )
+
+        self.assertEqual(result.status, "pass")
+        self.assertEqual(result.summary, "single-GPU laptop")
+
+    def test_desktop_check_is_skipped_even_with_two_gpus(self) -> None:
+        result = ergenctl.hybrid_graphics_check(3, self.INTEL_NVIDIA)
+
+        self.assertEqual(result.status, "skipped")
+
+    def test_unknown_chassis_does_not_claim_the_system_is_a_desktop(self) -> None:
+        with patch.object(ergenctl, "read_chassis_type", return_value=None):
+            result = ergenctl.hybrid_graphics_check(pci_output=self.INTEL_NVIDIA)
+
+        self.assertEqual(result.status, "unknown")
+        self.assertIn("determine", result.summary)
+
+    def test_switcheroo_parser_counts_devices(self) -> None:
+        self.assertEqual(
+            ergenctl.switcheroo_device_count("Device: 0\nDevice: 1\n"),
+            2,
+        )
+
+
 class BootModeTests(unittest.TestCase):
     def test_snapshot_boot_is_detected(self) -> None:
         with patch.object(

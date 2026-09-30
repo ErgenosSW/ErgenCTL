@@ -207,6 +207,8 @@ STATUS_COLORS = {
     "unknown": "35",
 }
 
+PORTABLE_CHASSIS_TYPES = {8, 9, 10, 11, 14, 30, 31, 32}
+
 
 def read_cmdline() -> str:
     try:
@@ -310,6 +312,107 @@ def firmware_check() -> Check:
         title="Firmware",
         status="pass",
         summary="UEFI" if uefi else "BIOS/legacy",
+    )
+
+
+def read_chassis_type() -> int | None:
+    try:
+        return int(Path("/sys/class/dmi/id/chassis_type").read_text(encoding="utf-8").strip())
+    except (OSError, ValueError):
+        return None
+
+
+def parse_graphics_devices(pci_output: str) -> list[str]:
+    """Return one description for each PCI display controller."""
+    devices: list[str] = []
+    pattern = re.compile(
+        r"^(?:[0-9a-fA-F]{4}:)?[0-9a-fA-F]{2}:[0-9a-fA-F]{2}\.[0-7]\s+"
+        r"(?:VGA compatible controller|3D controller|Display controller):\s+(.+)$"
+    )
+    for line in pci_output.splitlines():
+        match = pattern.match(line.strip())
+        if match:
+            devices.append(match.group(1).strip())
+    return devices
+
+
+def switcheroo_device_count(output: str) -> int:
+    return len(re.findall(r"^Device:\s+\d+\s*$", output, re.MULTILINE))
+
+
+def hybrid_graphics_check(
+    chassis_type: int | None = None,
+    pci_output: str | None = None,
+) -> Check:
+    title = "Hybrid graphics"
+    detected_chassis = read_chassis_type() if chassis_type is None else chassis_type
+    portable = detected_chassis in PORTABLE_CHASSIS_TYPES
+
+    if pci_output is None:
+        if not shutil.which("lspci"):
+            return Check("hybrid-graphics", title, "unknown", "pciutils is not installed")
+        code, pci_output, error = run(["lspci", "-D"])
+        if code != 0:
+            return Check("hybrid-graphics", title, "unknown", "Could not inspect graphics hardware", error or None)
+
+    devices = parse_graphics_devices(pci_output)
+    evidence = "; ".join(devices) or None
+    if detected_chassis is None:
+        return Check(
+            "hybrid-graphics",
+            title,
+            "unknown",
+            "Could not determine whether this system is a laptop",
+            evidence,
+        )
+    if not portable:
+        return Check(
+            "hybrid-graphics",
+            title,
+            "skipped",
+            "not a laptop",
+            f"chassis_type={detected_chassis}" + (f"; {evidence}" if evidence else ""),
+        )
+    if not devices:
+        return Check("hybrid-graphics", title, "unknown", "No graphics controller detected")
+    if len(devices) == 1:
+        return Check("hybrid-graphics", title, "pass", "single-GPU laptop", evidence)
+
+    if not shutil.which("switcherooctl"):
+        return Check(
+            "hybrid-graphics",
+            title,
+            "warning",
+            "dual-GPU laptop detected; switcheroo-control is not installed",
+            evidence,
+        )
+
+    service_code, service_output, service_error = run(["systemctl", "is-active", "switcheroo-control.service"])
+    if service_code != 0 or service_output != "active":
+        return Check(
+            "hybrid-graphics",
+            title,
+            "warning",
+            "dual-GPU laptop detected; switcheroo-control is not active",
+            "; ".join(part for part in (evidence, service_error or service_output) if part),
+        )
+
+    list_code, list_output, list_error = run(["switcherooctl", "list"])
+    visible = switcheroo_device_count(list_output) if list_code == 0 else 0
+    if visible < 2:
+        return Check(
+            "hybrid-graphics",
+            title,
+            "warning",
+            f"dual-GPU laptop detected; switcheroo-control reports {visible} GPU(s)",
+            "; ".join(part for part in (evidence, list_error or list_output) if part),
+        )
+    return Check(
+        "hybrid-graphics",
+        title,
+        "pass",
+        f"dual-GPU laptop ready ({visible} GPUs available)",
+        evidence,
     )
 
 
@@ -633,6 +736,7 @@ def collect_checks(root_fstype: str | None = None) -> list[Check]:
         distribution_check(),
         Check("kernel", "Kernel", "pass", platform.release()),
         firmware_check(),
+        hybrid_graphics_check(),
         secureboot_check(),
         root_check(),
         boot_mode_check(snapshot_detection),
