@@ -13,7 +13,7 @@ import gi
 gi.require_version("Gtk", "4.0")
 gi.require_version("Adw", "1")
 
-from gi.repository import Adw, Gio, GLib, GObject, Gtk  # noqa: E402
+from gi.repository import Adw, Gio, GLib, Gtk  # noqa: E402
 
 installed_module_directory = Path("/usr/lib/ergenctl")
 if installed_module_directory.is_dir():
@@ -42,113 +42,131 @@ APP_ID = "io.github.ergenossw.ErgenCTL"
 class ErgenCTLWindow(Adw.ApplicationWindow):
     def __init__(self, application: Adw.Application) -> None:
         super().__init__(application=application, title="ErgenCTL")
-        self.set_default_size(900, 720)
+        self.set_default_size(980, 760)
+        self.add_css_class("ergen-shell")
         self.boot_mode: str | None = None
         self.selected_snapshot: int | None = None
         self.repair_plan_ready = False
         self.operation_busy = False
         self.live_iso = live_iso_detected()
         self.connect("close-request", self._close_requested)
+        self._install_styles()
 
         toolbar = Adw.ToolbarView()
         header = Adw.HeaderBar()
+        brand = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=9)
+        brand.add_css_class("ergen-header-brand")
+        local_logo = Path(__file__).resolve().parent / "assets" / "ergenctl-logo.png"
+        brand_logo = Gtk.Image.new_from_file(str(local_logo)) if local_logo.exists() else Gtk.Image.new_from_icon_name("ergenctl")
+        brand_logo.set_pixel_size(30)
+        brand.append(brand_logo)
+        brand_name = Gtk.Label(label="ErgenCTL")
+        brand_name.add_css_class("ergen-header-title")
+        brand.append(brand_name)
+        header.pack_start(brand)
         self.pages = Adw.ViewStack()
-        switcher_title = Adw.ViewSwitcherTitle(stack=self.pages)
-        header.set_title_widget(switcher_title)
+        topnav = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+        topnav.add_css_class("ergen-topnav")
+        repair_nav = Gtk.ToggleButton(label="Repair")
+        repair_nav.add_css_class("ergen-topnav-button")
+        repair_nav.set_active(True)
+        secureboot_nav = Gtk.ToggleButton(label="Secure Boot")
+        secureboot_nav.add_css_class("ergen-topnav-button")
+        secureboot_nav.set_group(repair_nav)
+        repair_nav.connect("toggled", self._page_changed, "repair")
+        secureboot_nav.connect("toggled", self._page_changed, "secureboot")
+        topnav.append(repair_nav)
+        topnav.append(secureboot_nav)
+        header.set_title_widget(topnav)
         toolbar.add_top_bar(header)
-        switcher_bar = Adw.ViewSwitcherBar(stack=self.pages)
-        switcher_title.bind_property(
-            "title-visible",
-            switcher_bar,
-            "reveal",
-            GObject.BindingFlags.SYNC_CREATE | GObject.BindingFlags.INVERT_BOOLEAN,
-        )
-        toolbar.add_bottom_bar(switcher_bar)
         self.set_content(toolbar)
 
-        split = Adw.OverlaySplitView()
-        split.set_sidebar_width_fraction(0.34)
-        split.set_min_sidebar_width(280)
-        split.set_max_sidebar_width(360)
         toolbar.set_content(self.pages)
-        self.pages.add_titled_with_icon(split, "repair", "Repair", "system-tools-symbolic")
+        repair_scroll = Gtk.ScrolledWindow(hscrollbar_policy=Gtk.PolicyType.NEVER)
+        self.repair_scroll = repair_scroll
+        repair_page = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=22)
+        repair_page.add_css_class("ergen-dashboard")
+        repair_scroll.set_child(repair_page)
+        self.pages.add_titled_with_icon(repair_scroll, "repair", "Repair", "system-tools-symbolic")
 
-        sidebar = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=18)
-        sidebar.set_margin_top(24)
-        sidebar.set_margin_bottom(24)
-        sidebar.set_margin_start(24)
-        sidebar.set_margin_end(24)
-        split.set_sidebar(sidebar)
-
-        local_logo = Path(__file__).resolve().parent / "assets" / "ergenctl-logo.png"
-        logo = Gtk.Image.new_from_file(str(local_logo)) if local_logo.exists() else Gtk.Image.new_from_icon_name("ergenctl")
-        logo.set_pixel_size(96)
-        sidebar.append(logo)
-
-        heading = Gtk.Label(label="ErgenCTL")
-        heading.add_css_class("title-1")
-        sidebar.append(heading)
-
-        description = Gtk.Label(label="Diagnose and recover ErgenOS")
-        description.add_css_class("dim-label")
-        sidebar.append(description)
-
-        actions = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
-        sidebar.append(actions)
-        self.repair_actions = actions
-        self._add_action(actions, "Check system", "Run complete system diagnostics", "doctor")
-        self._add_action(actions, "Check snapshots", "List available recovery points", "snapshots")
-        self._add_action(actions, "Check hibernation", "Inspect resume configuration", "resume")
-        logs_button = Gtk.Button(label="Check boot logs", tooltip_text="Inspect errors and warnings from system startup")
-        logs_button.connect("clicked", self._show_logs_dialog)
-        actions.append(logs_button)
-        self._add_action(actions, "Plan repairs", "Show changes without applying them", "repair-plan")
-
-        self.bootloader_button = Gtk.Button(
-            label="Recover installed bootloader",
-            tooltip_text="Available from ErgenOS Live ISO for a mounted installation",
+        hero = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=28)
+        hero.add_css_class("ergen-command-hero")
+        hero_copy = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8, hexpand=True)
+        eyebrow = Gtk.Label(label="ERGENOS · SYSTEM CONTROL", xalign=0)
+        eyebrow.add_css_class("ergen-eyebrow")
+        hero_copy.append(eyebrow)
+        heading = Gtk.Label(label="Keep the system under control.", xalign=0, wrap=True)
+        heading.add_css_class("ergen-display")
+        hero_copy.append(heading)
+        description = Gtk.Label(
+            label="Diagnostics, recovery and boot protection in one control center.",
+            xalign=0,
+            wrap=True,
         )
+        description.add_css_class("ergen-muted")
+        hero_copy.append(description)
+        hero.append(hero_copy)
+        repair_page.append(hero)
+
+        self.workspace = Gtk.Stack(
+            transition_type=Gtk.StackTransitionType.SLIDE_LEFT_RIGHT,
+            transition_duration=220,
+        )
+        self.workspace.set_vexpand(True)
+        repair_page.append(self.workspace)
+
+        dashboard = Gtk.Grid(column_spacing=18, row_spacing=18)
+        dashboard.set_column_homogeneous(True)
+        self.status = dashboard
+        diagnostics = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=14)
+        diagnostics.add_css_class("ergen-panel")
+        diagnostics.append(self._panel_heading("DIAGNOSTICS", "Inspect system health"))
+        diagnostic_grid = Gtk.Grid(column_spacing=12, row_spacing=12, column_homogeneous=True)
+        diagnostic_grid.attach(self._command_card("System scan", "Full health report", "system-search-symbolic", "doctor"), 0, 0, 1, 1)
+        diagnostic_grid.attach(self._command_card("Snapshots", "Recovery points", "document-open-recent-symbolic", "snapshots"), 1, 0, 1, 1)
+        diagnostic_grid.attach(self._command_card("Hibernation", "Resume integrity", "weather-clear-night-symbolic", "resume"), 0, 1, 1, 1)
+        logs_card = self._custom_card("Boot logs", "Errors from startup", "utilities-terminal-symbolic")
+        logs_card.connect("clicked", self._show_logs_dialog)
+        diagnostic_grid.attach(logs_card, 1, 1, 1, 1)
+        diagnostics.append(diagnostic_grid)
+        dashboard.attach(diagnostics, 0, 0, 2, 1)
+
+        recovery = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12)
+        recovery.add_css_class("ergen-panel")
+        recovery.add_css_class("ergen-recovery-panel")
+        recovery.append(self._panel_heading("RECOVERY", "Controlled repair actions"))
+        self.repair_actions = recovery
+        plan_button = self._wide_action("Plan repairs", "Preview every proposed change", "view-list-symbolic")
+        plan_button.connect("clicked", lambda _button: self._run(COMMANDS["repair-plan"]))
+        recovery.append(plan_button)
+        self.bootloader_button = self._wide_action("Recover bootloader", "Live ISO emergency workflow", "drive-harddisk-symbolic")
         self.bootloader_button.connect("clicked", self._confirm_bootloader_repair)
         self.bootloader_button.set_visible(self.live_iso)
-        actions.append(self.bootloader_button)
-
-        self.repair_button = Gtk.Button(
-            label="Repair system",
-            tooltip_text="Run Check system first",
-            sensitive=False,
-        )
-        self.repair_button.add_css_class("suggested-action")
+        recovery.append(self.bootloader_button)
+        self.repair_button = self._wide_action("Repair system", "Available after a successful scan", "applications-engineering-symbolic")
+        self.repair_button.add_css_class("ergen-primary-action")
+        self.repair_button.set_sensitive(False)
         self.repair_button.connect("clicked", self._confirm_repair)
-        actions.append(self.repair_button)
-
-        self.rollback_button = Gtk.Button(
-            label="Restore a snapshot",
-            tooltip_text="Available after booting from a snapshot",
-            sensitive=False,
-        )
+        recovery.append(self.repair_button)
+        self.rollback_button = self._wide_action("Restore snapshot", "Available while booted from a snapshot", "edit-undo-symbolic")
+        self.rollback_button.set_sensitive(False)
         self.rollback_button.connect("clicked", self._show_rollback_dialog)
-        actions.append(self.rollback_button)
+        recovery.append(self.rollback_button)
+        dashboard.attach(recovery, 2, 0, 1, 1)
+        self.workspace.add_named(dashboard, "dashboard")
 
-        content = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12)
-        content.set_margin_top(24)
-        content.set_margin_bottom(24)
-        content.set_margin_start(24)
-        content.set_margin_end(24)
-        split.set_content(content)
-
-        self.status = Adw.StatusPage(
-            title="Live recovery" if self.live_iso else "Ready",
-            description=(
-                "Mount an installed ErgenOS system, then recover its bootloader."
-                if self.live_iso
-                else "Choose an action to inspect or repair this system."
-            ),
-            icon_name="system-search-symbolic",
-        )
-        content.append(self.status)
-
-        self.result_heading = Gtk.Label(xalign=0)
+        result_header = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12)
+        self.back_button = Gtk.Button()
+        self.back_button.add_css_class("ergen-back-button")
+        back_content = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        back_content.append(Gtk.Image.new_from_icon_name("go-previous-symbolic"))
+        back_content.append(Gtk.Label(label="Dashboard"))
+        self.back_button.set_child(back_content)
+        self.back_button.connect("clicked", self._show_dashboard)
+        result_header.append(self.back_button)
+        self.result_heading = Gtk.Label(xalign=0, hexpand=True)
         self.result_heading.add_css_class("title-2")
+        result_header.append(self.result_heading)
         self.result_summary = Gtk.Label(xalign=0, wrap=True)
         self.result_summary.add_css_class("dim-label")
         self.results = Gtk.ListBox(selection_mode=Gtk.SelectionMode.NONE)
@@ -162,26 +180,254 @@ class ErgenCTLWindow(Adw.ApplicationWindow):
         self.raw_expander = Gtk.Expander(label="Technical details")
         self.raw_expander.set_child(self.raw_output)
         result_content = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=16)
-        result_content.append(self.result_heading)
+        result_content.append(result_header)
         result_content.append(self.result_summary)
         result_content.append(self.results)
         result_content.append(self.skipped_expander)
         result_content.append(self.raw_expander)
-        output_scroll = Gtk.ScrolledWindow(vexpand=True)
-        output_scroll.set_child(result_content)
-        output_scroll.set_visible(False)
-        self.output_scroll = output_scroll
-        content.append(output_scroll)
+        result_content.add_css_class("ergen-results-panel")
+        self.output_scroll = result_content
+        self.workspace.add_named(self.output_scroll, "results")
+        self.workspace.set_visible_child_name("dashboard")
 
         self.spinner = Gtk.Spinner()
-        content.append(self.spinner)
+        self.spinner.set_halign(Gtk.Align.CENTER)
+        repair_page.append(self.spinner)
         self.secureboot_page = SecureBootPage(self)
         self.pages.add_titled_with_icon(self.secureboot_page, "secureboot", "Secure Boot", "security-high-symbolic")
         self.pages.set_visible_child_name("repair")
 
+    @staticmethod
+    def _panel_heading(eyebrow: str, title: str) -> Gtk.Widget:
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=3)
+        kicker = Gtk.Label(label=eyebrow, xalign=0)
+        kicker.add_css_class("ergen-eyebrow")
+        box.append(kicker)
+        heading = Gtk.Label(label=title, xalign=0)
+        heading.add_css_class("ergen-panel-title")
+        box.append(heading)
+        return box
+
+    def _command_card(self, title: str, subtitle: str, icon: str, command: str) -> Gtk.Button:
+        button = self._custom_card(title, subtitle, icon)
+        button.connect("clicked", lambda _button: self._run(COMMANDS[command]))
+        return button
+
+    @staticmethod
+    def _custom_card(title: str, subtitle: str, icon: str) -> Gtk.Button:
+        button = Gtk.Button()
+        button.add_css_class("ergen-command-card")
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
+        image = Gtk.Image.new_from_icon_name(icon)
+        image.set_pixel_size(28)
+        image.set_halign(Gtk.Align.START)
+        image.add_css_class("ergen-card-icon")
+        box.append(image)
+        label = Gtk.Label(label=title, xalign=0)
+        label.add_css_class("ergen-card-title")
+        box.append(label)
+        detail = Gtk.Label(label=subtitle, xalign=0, wrap=True)
+        detail.add_css_class("ergen-muted")
+        box.append(detail)
+        button.set_child(box)
+        return button
+
+    @staticmethod
+    def _wide_action(title: str, subtitle: str, icon: str) -> Gtk.Button:
+        button = Gtk.Button()
+        button.add_css_class("ergen-wide-action")
+        row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12)
+        image = Gtk.Image.new_from_icon_name(icon)
+        image.set_pixel_size(22)
+        row.append(image)
+        labels = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
+        labels.set_hexpand(True)
+        labels.append(Gtk.Label(label=title, xalign=0))
+        detail = Gtk.Label(label=subtitle, xalign=0, wrap=True)
+        detail.add_css_class("ergen-muted")
+        labels.append(detail)
+        row.append(labels)
+        row.append(Gtk.Image.new_from_icon_name("go-next-symbolic"))
+        button.set_child(row)
+        return button
+
+    def _page_changed(self, button: Gtk.ToggleButton, page: str) -> None:
+        if button.get_active():
+            self.pages.set_visible_child_name(page)
+
+    def _show_dashboard(self, _button: Gtk.Button | None = None) -> None:
+        if self.operation_busy:
+            return
+        self.workspace.set_visible_child_name("dashboard")
+        self.repair_scroll.get_vadjustment().set_value(0)
+
+    def _install_styles(self) -> None:
+        Adw.StyleManager.get_default().set_color_scheme(Adw.ColorScheme.PREFER_DARK)
+        provider = Gtk.CssProvider()
+        provider.load_from_data(b"""
+          window.ergen-shell {
+            background: linear-gradient(145deg, #030a14, #071525);
+            color: #eaf3ff;
+          }
+          window.ergen-shell headerbar {
+            background: alpha(#030a14, 0.94);
+            border-bottom: 1px solid alpha(#8fbeeb, 0.16);
+            box-shadow: none;
+          }
+          .ergen-header-brand { margin-left: 4px; }
+          .ergen-header-title { color: #eaf3ff; font-size: 16px; font-weight: 800; }
+          .ergen-dashboard { padding: 28px 32px 34px; }
+          .ergen-command-hero {
+            padding: 32px 36px;
+            border-radius: 24px;
+            border: 1px solid alpha(#31b6ff, 0.30);
+            background: linear-gradient(120deg, #0b3152, #08182b 68%, #07111f);
+            box-shadow: 0 18px 48px alpha(black, 0.30);
+          }
+          .ergen-display { color: #f4f9ff; font-size: 34px; font-weight: 850; }
+          .ergen-panel {
+            padding: 22px;
+            border-radius: 20px;
+            border: 1px solid alpha(#8fbeeb, 0.16);
+            background: alpha(#081424, 0.94);
+          }
+          .ergen-recovery-panel {
+            border-color: alpha(#31b6ff, 0.24);
+            background: linear-gradient(155deg, alpha(#0b2138, 0.98), alpha(#07111f, 0.98));
+          }
+          .ergen-panel-title { color: #f4f9ff; font-size: 20px; font-weight: 800; }
+          .ergen-command-card {
+            min-height: 126px;
+            padding: 18px;
+            border-radius: 16px;
+            border: 1px solid alpha(#8fbeeb, 0.14);
+            background: alpha(#0b2035, 0.66);
+          }
+          .ergen-command-card:hover {
+            border-color: alpha(#31b6ff, 0.55);
+            background: linear-gradient(145deg, alpha(#10446e, 0.72), alpha(#0b2035, 0.82));
+            box-shadow: 0 10px 26px alpha(black, 0.22);
+          }
+          .ergen-card-icon { color: #54c3ff; }
+          .ergen-card-title { color: #f4f9ff; font-size: 16px; font-weight: 800; }
+          .ergen-wide-action {
+            min-height: 62px;
+            padding: 8px 12px;
+            border-radius: 14px;
+            border: 1px solid alpha(#8fbeeb, 0.14);
+            background: alpha(#0b2035, 0.72);
+          }
+          .ergen-wide-action:hover { border-color: alpha(#31b6ff, 0.50); }
+          .ergen-primary-action {
+            background: linear-gradient(135deg, #0aa7ff, #0068ff);
+            color: white;
+          }
+          .ergen-results-panel {
+            padding: 24px;
+            border-radius: 20px;
+            border: 1px solid alpha(#31b6ff, 0.22);
+            background: alpha(#081424, 0.96);
+          }
+          .ergen-back-button {
+            min-height: 38px;
+            border-radius: 11px;
+            border: 1px solid alpha(#31b6ff, 0.24);
+            background: alpha(#0b2035, 0.82);
+          }
+          .secureboot-dashboard { padding: 8px; }
+          .secureboot-hero {
+            padding: 28px 30px;
+            border-radius: 22px;
+            border: 1px solid alpha(#31b6ff, 0.28);
+            background: linear-gradient(125deg, #0b3152, #07111f);
+          }
+          .secureboot-controls {
+            padding: 12px;
+            border-radius: 15px;
+            background: alpha(#081424, 0.92);
+          }
+          .secureboot-next, .secureboot-notice, .secureboot-maintenance {
+            padding: 18px;
+            border-radius: 18px;
+            border: 1px solid alpha(#8fbeeb, 0.16);
+            background: alpha(#081424, 0.94);
+          }
+          .secureboot-next { border-color: alpha(#31b6ff, 0.32); }
+          .secureboot-checklist list {
+            border: 1px solid alpha(#8fbeeb, 0.16);
+            border-radius: 16px;
+            background: alpha(#081424, 0.94);
+          }
+          .ergen-sidebar {
+            padding: 34px;
+            border-right: 1px solid alpha(#8fbeeb, 0.16);
+            background: linear-gradient(155deg, alpha(#0a2744, 0.96), alpha(#07111f, 0.96));
+          }
+          .ergen-topnav {
+            padding: 4px;
+            border-radius: 13px;
+            border: 1px solid alpha(#8fbeeb, 0.14);
+            background: alpha(#081424, 0.82);
+          }
+          .ergen-topnav-button {
+            min-width: 120px;
+            min-height: 36px;
+            border: 0;
+            border-radius: 9px;
+            background: transparent;
+          }
+          .ergen-topnav-button:checked {
+            background: linear-gradient(135deg, alpha(#0aa7ff, 0.32), alpha(#0068ff, 0.38));
+            color: white;
+          }
+          .ergen-eyebrow {
+            color: #54c3ff;
+            font-size: 10px;
+            font-weight: 800;
+            letter-spacing: 1.5px;
+          }
+          .ergen-muted, .dim-label { color: #9db0c8; }
+          .ergen-actions button {
+            min-height: 42px;
+            border-radius: 12px;
+            border: 1px solid alpha(#8fbeeb, 0.15);
+            background: alpha(#0b2035, 0.78);
+          }
+          .ergen-actions button:hover {
+            border-color: alpha(#31b6ff, 0.42);
+            background: alpha(#0d2c49, 0.94);
+          }
+          .ergen-content { padding: 4px; }
+          .ergen-status {
+            margin: 8px;
+            padding: 38px;
+            border-radius: 22px;
+            border: 1px solid alpha(#31b6ff, 0.24);
+            background: linear-gradient(135deg, alpha(#0a2744, 0.82), alpha(#07111f, 0.88));
+          }
+          .ergen-status-title { color: #f4f9ff; font-size: 27px; font-weight: 800; }
+          .boxed-list {
+            border: 1px solid alpha(#8fbeeb, 0.16);
+            border-radius: 16px;
+            background: alpha(#081424, 0.92);
+          }
+          row { background: transparent; }
+          button.suggested-action {
+            background: linear-gradient(135deg, #0aa7ff, #0068ff);
+            color: white;
+            font-weight: 700;
+            box-shadow: 0 8px 24px alpha(#0068ff, 0.24);
+          }
+          view, textview { background: alpha(#030a14, 0.82); color: #cfe2f5; }
+        """)
+        Gtk.StyleContext.add_provider_for_display(
+            self.get_display(), provider, Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION
+        )
+
     def set_operation_busy(self, busy: bool) -> None:
         self.operation_busy = busy
         self.repair_actions.set_sensitive(not busy)
+        self.back_button.set_sensitive(not busy)
         self.secureboot_page.update_buttons()
 
     def _close_requested(self, _window) -> bool:
@@ -194,6 +440,7 @@ class ErgenCTLWindow(Adw.ApplicationWindow):
 
     def _add_action(self, box: Gtk.Box, label: str, tooltip: str, command: str) -> None:
         button = Gtk.Button(label=label, tooltip_text=tooltip)
+        button.add_css_class("ergen-action")
         button.connect("clicked", lambda _button: self._run(COMMANDS[command]))
         box.append(button)
 
@@ -343,8 +590,7 @@ class ErgenCTLWindow(Adw.ApplicationWindow):
             self._show_result(command.title, "pkexec is not installed", False)
             return
 
-        self.status.set_visible(False)
-        self.output_scroll.set_visible(True)
+        self.workspace.set_visible_child_name("results")
         self._clear_results()
         self.result_heading.set_label(command.title)
         self.result_summary.set_label("Running...")
@@ -582,7 +828,7 @@ class ErgenCTLWindow(Adw.ApplicationWindow):
         self.skipped_expander.set_expanded(False)
 
     def _scroll_results_to_top(self) -> bool:
-        adjustment = self.output_scroll.get_vadjustment()
+        adjustment = self.repair_scroll.get_vadjustment()
         adjustment.set_value(adjustment.get_lower())
         return GLib.SOURCE_REMOVE
 

@@ -21,12 +21,14 @@ class SecureBootPage(Gtk.ScrolledWindow):
         self.buttons = {}
         self.available = Path(BACKEND).is_file()
         box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=20)
+        box.add_css_class("secureboot-dashboard")
         for side in ("top", "bottom", "start", "end"):
             getattr(box, "set_margin_" + side)(24)
         clamp = Adw.Clamp(maximum_size=760)
         clamp.set_child(box)
         self.set_child(clamp)
         heading_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12)
+        heading_box.add_css_class("secureboot-hero")
         icon = Gtk.Image.new_from_icon_name("security-high-symbolic")
         icon.set_pixel_size(32)
         heading_box.append(icon)
@@ -41,6 +43,7 @@ class SecureBootPage(Gtk.ScrolledWindow):
         box.append(heading_box)
 
         controls = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        controls.add_css_class("secureboot-controls")
         for action, label in (("status", "Check status"), ("preflight", "Check readiness")):
             button = Gtk.Button(label=label)
             button.connect("clicked", lambda _b, a=action: self.activate(a))
@@ -55,7 +58,7 @@ class SecureBootPage(Gtk.ScrolledWindow):
         box.append(self.spinner)
 
         next_card = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10)
-        next_card.add_css_class("card")
+        next_card.add_css_class("secureboot-next")
         next_content = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10)
         for side in ("top", "bottom", "start", "end"):
             getattr(next_content, "set_margin_" + side)(16)
@@ -73,6 +76,7 @@ class SecureBootPage(Gtk.ScrolledWindow):
         box.append(next_card)
 
         self.notice_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
+        self.notice_box.add_css_class("secureboot-notice")
         title = Gtk.Label(label=MOK_TITLE, wrap=True, xalign=0)
         title.add_css_class("heading")
         self.notice_box.append(title)
@@ -83,6 +87,7 @@ class SecureBootPage(Gtk.ScrolledWindow):
 
         self.check_group = Adw.PreferencesGroup(title="Setup checklist",
             description="Each item is checked separately. Details show what is complete and what still needs attention.")
+        self.check_group.add_css_class("secureboot-checklist")
         self.check_rows = []
         box.append(self.check_group)
         self.problems = Gtk.Label(wrap=True, xalign=0, selectable=True)
@@ -91,6 +96,7 @@ class SecureBootPage(Gtk.ScrolledWindow):
         box.append(self.problems)
 
         self.maintenance = Gtk.Expander(label="Maintenance and removal")
+        self.maintenance.add_css_class("secureboot-maintenance")
         maintenance_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=16)
         maintenance_box.set_margin_top(12)
         self.maintenance_rows = {}
