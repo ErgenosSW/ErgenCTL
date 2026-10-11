@@ -36,6 +36,21 @@ class Check:
 
 
 @dataclass(frozen=True)
+class GraphicsDevice:
+    address: str
+    description: str
+    driver: str | None = None
+
+
+@dataclass(frozen=True)
+class SwitcherooDevice:
+    identifier: int
+    name: str
+    default: bool
+    environment: str | None = None
+
+
+@dataclass(frozen=True)
 class SnapshotReport:
     boot_mode: str
     current_snapshot: int | None
@@ -324,25 +339,83 @@ def read_chassis_type() -> int | None:
 
 def parse_graphics_devices(pci_output: str) -> list[str]:
     """Return one description for each PCI display controller."""
-    devices: list[str] = []
+    return [device.description for device in parse_graphics_device_details(pci_output)]
+
+
+def parse_graphics_device_details(pci_output: str) -> list[GraphicsDevice]:
+    devices: list[GraphicsDevice] = []
     pattern = re.compile(
-        r"^(?:[0-9a-fA-F]{4}:)?[0-9a-fA-F]{2}:[0-9a-fA-F]{2}\.[0-7]\s+"
-        r"(?:VGA compatible controller|3D controller|Display controller):\s+(.+)$"
+        r"^((?:[0-9a-fA-F]{4}:)?[0-9a-fA-F]{2}:[0-9a-fA-F]{2}\.[0-7])\s+"
+        r"(?:VGA compatible controller|3D controller|Display controller)(?:\s+\[[0-9a-fA-F]{4}\])?"
+        r":\s+(.+)$"
     )
+    current: GraphicsDevice | None = None
     for line in pci_output.splitlines():
         match = pattern.match(line.strip())
         if match:
-            devices.append(match.group(1).strip())
+            current = GraphicsDevice(match.group(1), match.group(2).strip())
+            devices.append(current)
+            continue
+        driver_match = re.match(r"^Kernel driver in use:\s+(.+)$", line.strip())
+        if current is not None and driver_match:
+            devices[-1] = replace(current, driver=driver_match.group(1).strip())
+            current = devices[-1]
     return devices
 
 
 def switcheroo_device_count(output: str) -> int:
-    return len(re.findall(r"^Device:\s+\d+\s*$", output, re.MULTILINE))
+    return len(parse_switcheroo_devices(output))
+
+
+def parse_switcheroo_devices(output: str) -> list[SwitcherooDevice]:
+    devices: list[SwitcherooDevice] = []
+    blocks = re.split(r"(?=^Device:\s+\d+\s*$)", output, flags=re.MULTILINE)
+    for block in blocks:
+        identifier_match = re.search(r"^Device:\s+(\d+)\s*$", block, re.MULTILINE)
+        if identifier_match is None:
+            continue
+        name_match = re.search(r"^\s*Name:\s+(.+)$", block, re.MULTILINE)
+        default_match = re.search(r"^\s*Default:\s+(.+)$", block, re.MULTILINE)
+        environment_match = re.search(r"^\s*Environment:\s+(.+)$", block, re.MULTILINE)
+        devices.append(
+            SwitcherooDevice(
+                int(identifier_match.group(1)),
+                name_match.group(1).strip() if name_match else f"GPU {identifier_match.group(1)}",
+                bool(default_match and default_match.group(1).strip().casefold() in {"yes", "true", "1"}),
+                environment_match.group(1).strip() if environment_match else None,
+            )
+        )
+    return devices
+
+
+def expected_graphics_driver(description: str) -> tuple[str, ...]:
+    lowered = description.casefold()
+    if "nvidia" in lowered:
+        return ("nvidia",)
+    if (
+        "amd" in lowered
+        or "advanced micro devices" in lowered
+        or re.search(r"\bATI\b", description, re.IGNORECASE)
+    ):
+        return ("amdgpu",)
+    if "intel" in lowered:
+        return ("i915", "xe")
+    return ()
+
+
+def graphics_runtime_power(address: str) -> str:
+    path = Path("/sys/bus/pci/devices") / address / "power/runtime_status"
+    try:
+        return path.read_text(encoding="utf-8").strip() or "unknown"
+    except OSError:
+        return "unavailable"
 
 
 def hybrid_graphics_check(
     chassis_type: int | None = None,
     pci_output: str | None = None,
+    switcheroo_output: str | None = None,
+    runtime_power: dict[str, str] | None = None,
 ) -> Check:
     title = "Hybrid graphics"
     detected_chassis = read_chassis_type() if chassis_type is None else chassis_type
@@ -351,11 +424,12 @@ def hybrid_graphics_check(
     if pci_output is None:
         if not shutil.which("lspci"):
             return Check("hybrid-graphics", title, "unknown", "pciutils is not installed")
-        code, pci_output, error = run(["lspci", "-D"])
+        code, pci_output, error = run(["lspci", "-Dk"])
         if code != 0:
             return Check("hybrid-graphics", title, "unknown", "Could not inspect graphics hardware", error or None)
 
-    devices = parse_graphics_devices(pci_output)
+    device_details = parse_graphics_device_details(pci_output)
+    devices = [device.description for device in device_details]
     evidence = "; ".join(devices) or None
     if detected_chassis is None:
         return Check(
@@ -397,8 +471,12 @@ def hybrid_graphics_check(
             "; ".join(part for part in (evidence, service_error or service_output) if part),
         )
 
-    list_code, list_output, list_error = run(["switcherooctl", "list"])
-    visible = switcheroo_device_count(list_output) if list_code == 0 else 0
+    if switcheroo_output is None:
+        list_code, list_output, list_error = run(["switcherooctl", "list"])
+    else:
+        list_code, list_output, list_error = 0, switcheroo_output, ""
+    switcheroo_devices = parse_switcheroo_devices(list_output) if list_code == 0 else []
+    visible = len(switcheroo_devices)
     if visible < 2:
         return Check(
             "hybrid-graphics",
@@ -407,12 +485,58 @@ def hybrid_graphics_check(
             f"dual-GPU laptop detected; switcheroo-control reports {visible} GPU(s)",
             "; ".join(part for part in (evidence, list_error or list_output) if part),
         )
+    issues: list[str] = []
+    device_evidence: list[str] = []
+    power_states = runtime_power or {
+        device.address: graphics_runtime_power(device.address) for device in device_details
+    }
+    for device in device_details:
+        expected = expected_graphics_driver(device.description)
+        driver = device.driver or "missing"
+        if expected and driver not in expected:
+            expected_text = "/".join(expected)
+            issues.append(f"{device.description} uses {driver}, expected {expected_text}")
+        power = power_states.get(device.address, "unavailable")
+        device_evidence.append(
+            f"{device.address} {device.description} [driver={driver}, power={power}]"
+        )
+
+    defaults = [device for device in switcheroo_devices if device.default]
+    if len(defaults) != 1:
+        issues.append(f"switcheroo-control reports {len(defaults)} default GPUs")
+        default_name = "unknown"
+    else:
+        default_name = defaults[0].name
+
+    offload_devices = [
+        device
+        for device in switcheroo_devices
+        if not device.default
+        and device.environment
+        and ("DRI_PRIME=" in device.environment or "__NV_PRIME_RENDER_OFFLOAD=" in device.environment)
+    ]
+    if not offload_devices:
+        issues.append("no render-offload environment is available for the discrete GPU")
+    offload_name = offload_devices[0].name if offload_devices else "unavailable"
+    switcheroo_evidence = [
+        f"default={default_name}",
+        f"offload={offload_name}",
+        *device_evidence,
+    ]
+    if issues:
+        return Check(
+            "hybrid-graphics",
+            title,
+            "warning",
+            f"dual-GPU laptop needs attention ({len(issues)} issue(s))",
+            "; ".join((*issues, *switcheroo_evidence)),
+        )
     return Check(
         "hybrid-graphics",
         title,
         "pass",
-        f"dual-GPU laptop ready ({visible} GPUs available)",
-        evidence,
+        f"dual-GPU ready; default: {default_name}; offload: {offload_name}",
+        "; ".join(switcheroo_evidence),
     )
 
 

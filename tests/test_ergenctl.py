@@ -148,7 +148,36 @@ class DistributionCheckTests(unittest.TestCase):
 class HybridGraphicsTests(unittest.TestCase):
     INTEL_NVIDIA = (
         "0000:00:02.0 VGA compatible controller: Intel Corporation Arc Graphics\n"
+        "\tKernel driver in use: xe\n"
         "0000:01:00.0 3D controller: NVIDIA Corporation GeForce RTX 4060 Laptop GPU\n"
+        "\tKernel driver in use: nvidia\n"
+    )
+    AMD_NVIDIA = (
+        "0000:04:00.0 VGA compatible controller: Advanced Micro Devices, Inc. "
+        "[AMD/ATI] Strix Point [Radeon 860M]\n"
+        "\tKernel driver in use: amdgpu\n"
+        "0000:01:00.0 3D controller: NVIDIA Corporation Device 2d98 "
+        "[GeForce RTX 5050 Mobile]\n"
+        "\tKernel driver in use: nvidia\n"
+    )
+    SWITCHEROO_READY = (
+        "Device: 0\n"
+        "  Name: Intel Arc Graphics\n"
+        "  Default: yes\n"
+        "Device: 1\n"
+        "  Name: NVIDIA GeForce RTX 4060 Laptop GPU\n"
+        "  Default: no\n"
+        "  Environment: __GLX_VENDOR_LIBRARY_NAME=nvidia __NV_PRIME_RENDER_OFFLOAD=1\n"
+    )
+    SWITCHEROO_AMD_NVIDIA = (
+        "Device: 0\n"
+        "  Name: AMD Radeon 860M\n"
+        "  Default: yes\n"
+        "  Environment: DRI_PRIME=pci-0000_04_00_0\n"
+        "Device: 1\n"
+        "  Name: NVIDIA GeForce RTX 5050 Laptop GPU\n"
+        "  Default: no\n"
+        "  Environment: __GLX_VENDOR_LIBRARY_NAME=nvidia __NV_PRIME_RENDER_OFFLOAD=1\n"
     )
 
     def test_dual_gpu_laptop_is_ready_when_switcheroo_lists_both_gpus(self) -> None:
@@ -156,17 +185,42 @@ class HybridGraphicsTests(unittest.TestCase):
             if command[:2] == ["systemctl", "is-active"]:
                 return 0, "active", ""
             if command[:2] == ["switcherooctl", "list"]:
-                return 0, "Device: 0\n  Name: Intel\nDevice: 1\n  Name: NVIDIA", ""
+                return 0, self.SWITCHEROO_READY, ""
             raise AssertionError(command)
 
         with (
             patch.object(ergenctl.shutil, "which", return_value="/usr/bin/switcherooctl"),
             patch.object(ergenctl, "run", side_effect=command_result),
         ):
-            result = ergenctl.hybrid_graphics_check(10, self.INTEL_NVIDIA)
+            result = ergenctl.hybrid_graphics_check(
+                10,
+                self.INTEL_NVIDIA,
+                runtime_power={"0000:00:02.0": "active", "0000:01:00.0": "suspended"},
+            )
 
         self.assertEqual(result.status, "pass")
-        self.assertIn("2 GPUs", result.summary)
+        self.assertIn("default: Intel", result.summary)
+        self.assertIn("offload: NVIDIA", result.summary)
+        self.assertIn("driver=nvidia", result.evidence or "")
+        self.assertIn("power=suspended", result.evidence or "")
+
+    def test_amd_radeon_860m_and_rtx_5050_laptop_is_ready(self) -> None:
+        with (
+            patch.object(ergenctl.shutil, "which", return_value="/usr/bin/switcherooctl"),
+            patch.object(ergenctl, "run", return_value=(0, "active", "")),
+        ):
+            result = ergenctl.hybrid_graphics_check(
+                10,
+                self.AMD_NVIDIA,
+                self.SWITCHEROO_AMD_NVIDIA,
+                {"0000:04:00.0": "active", "0000:01:00.0": "suspended"},
+            )
+
+        self.assertEqual(result.status, "pass")
+        self.assertIn("default: AMD Radeon 860M", result.summary)
+        self.assertIn("offload: NVIDIA GeForce RTX 5050", result.summary)
+        self.assertIn("driver=amdgpu", result.evidence or "")
+        self.assertIn("driver=nvidia", result.evidence or "")
 
     def test_dual_gpu_laptop_warns_when_switcheroo_is_missing(self) -> None:
         with patch.object(ergenctl.shutil, "which", return_value=None):
@@ -211,6 +265,54 @@ class HybridGraphicsTests(unittest.TestCase):
             ergenctl.switcheroo_device_count("Device: 0\nDevice: 1\n"),
             2,
         )
+
+    def test_graphics_parser_associates_kernel_drivers_with_devices(self) -> None:
+        devices = ergenctl.parse_graphics_device_details(self.INTEL_NVIDIA)
+
+        self.assertEqual([device.address for device in devices], ["0000:00:02.0", "0000:01:00.0"])
+        self.assertEqual([device.driver for device in devices], ["xe", "nvidia"])
+
+    def test_wrong_nvidia_driver_is_reported(self) -> None:
+        pci_output = self.INTEL_NVIDIA.replace(
+            "Kernel driver in use: nvidia",
+            "Kernel driver in use: nouveau",
+        )
+        with (
+            patch.object(ergenctl.shutil, "which", return_value="/usr/bin/switcherooctl"),
+            patch.object(
+                ergenctl,
+                "run",
+                return_value=(0, "active", ""),
+            ),
+        ):
+            result = ergenctl.hybrid_graphics_check(
+                10,
+                pci_output,
+                self.SWITCHEROO_READY,
+                {"0000:00:02.0": "active", "0000:01:00.0": "active"},
+            )
+
+        self.assertEqual(result.status, "warning")
+        self.assertIn("uses nouveau, expected nvidia", result.evidence or "")
+
+    def test_missing_offload_environment_is_reported(self) -> None:
+        switcheroo_output = self.SWITCHEROO_READY.replace(
+            "  Environment: __GLX_VENDOR_LIBRARY_NAME=nvidia __NV_PRIME_RENDER_OFFLOAD=1\n",
+            "",
+        )
+        with (
+            patch.object(ergenctl.shutil, "which", return_value="/usr/bin/switcherooctl"),
+            patch.object(ergenctl, "run", return_value=(0, "active", "")),
+        ):
+            result = ergenctl.hybrid_graphics_check(
+                10,
+                self.INTEL_NVIDIA,
+                switcheroo_output,
+                {"0000:00:02.0": "active", "0000:01:00.0": "suspended"},
+            )
+
+        self.assertEqual(result.status, "warning")
+        self.assertIn("no render-offload environment", result.evidence or "")
 
 
 class BootModeTests(unittest.TestCase):
