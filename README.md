@@ -30,6 +30,17 @@ The recovery workflow is designed for a system that no longer starts normally:
 
 When started from a snapshot, ErgenCTL mounts the real base installation and performs repairs there. It does not write changes into the temporary snapshot overlay.
 
+## ErgenOS 1.2 package
+
+The ISO uses **ergenctl 1.1.0.dev-9**, with the redesigned control-center GUI,
+hybrid GPU diagnostics and post-update verification. This package version is
+separate from the older v1.0.0 source-release badge above.
+See [CHANGELOG.md](CHANGELOG.md).
+
+`ergenctl verify-update --json` is the diagnostics backend called by ErgenPac;
+it does not replace Pacman or create an additional set of update snapshots.
+Gaming Check was deferred to 1.3 and is not an available command.
+
 ## Current capabilities
 
 - Compact system status and extended diagnostics
