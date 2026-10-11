@@ -315,6 +315,78 @@ class HybridGraphicsTests(unittest.TestCase):
         self.assertIn("no render-offload environment", result.evidence or "")
 
 
+class UpdateVerificationTests(unittest.TestCase):
+    def test_latest_snapper_pre_post_pair_is_verified(self) -> None:
+        result = ergenctl.snapshot_pair_check(
+            [
+                {"number": 20, "type": "pre", "pre_number": None, "description": "pacman -Syu"},
+                {"number": 21, "type": "post", "pre_number": "20", "description": "linux-zen"},
+            ]
+        )
+
+        self.assertEqual(result.status, "pass")
+        self.assertEqual(result.summary, "pre #20 / post #21")
+
+    def test_unpaired_post_snapshot_needs_attention(self) -> None:
+        result = ergenctl.snapshot_pair_check(
+            [{"number": 21, "type": "post", "pre_number": "20", "description": "linux-zen"}]
+        )
+
+        self.assertEqual(result.status, "warning")
+        self.assertIn("no matching pre", result.summary)
+
+    def test_missing_running_kernel_tree_requests_restart_without_failure(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            result, reboot_required = ergenctl.kernel_restart_check(
+                "6.12.1-zen1-1-zen", Path(directory)
+            )
+
+        self.assertEqual(result.status, "pass")
+        self.assertTrue(reboot_required)
+
+    def test_missing_nvidia_module_is_critical(self) -> None:
+        with (
+            patch.object(ergenctl.shutil, "which", return_value="/usr/bin/modinfo"),
+            patch.object(ergenctl, "run", return_value=(1, "", "module not found")),
+        ):
+            result = ergenctl.nvidia_kernel_modules_check(
+                "0000:01:00.0 3D controller: NVIDIA Corporation Device 2d98",
+                ["6.12.1-zen1-1-zen"],
+            )
+
+        self.assertEqual(result.status, "fail")
+        self.assertIn("6.12.1-zen1-1-zen", result.evidence or "")
+
+    def test_report_state_distinguishes_restart_from_failure(self) -> None:
+        passing = ergenctl.Check("test", "Test", "pass", "ok")
+        snapshot_report = ergenctl.SnapshotReport(
+            "normal",
+            None,
+            True,
+            None,
+            entries=[
+                {"number": 20, "type": "pre", "pre_number": None, "description": "upgrade"},
+                {"number": 21, "type": "post", "pre_number": "20", "description": "upgrade"},
+            ],
+        )
+        with (
+            patch.object(ergenctl, "root_filesystem_type", return_value="btrfs"),
+            patch.object(ergenctl, "collect_snapshot_report", return_value=(snapshot_report, False)),
+            patch.object(ergenctl, "pacman_hooks_check", return_value=passing),
+            patch.object(ergenctl, "kernel_restart_check", return_value=(passing, True)),
+            patch.object(ergenctl, "boot_files_check", return_value=passing),
+            patch.object(ergenctl, "grub_config_check", return_value=passing),
+            patch.object(ergenctl, "nvidia_kernel_modules_check", return_value=passing),
+            patch.object(ergenctl, "secureboot_check", return_value=passing),
+            patch.object(ergenctl, "failed_units_check", return_value=passing),
+        ):
+            report = ergenctl.collect_update_verification()
+
+        self.assertTrue(report.success)
+        self.assertTrue(report.reboot_required)
+        self.assertEqual(report.state, "reboot-required")
+
+
 class BootModeTests(unittest.TestCase):
     def test_snapshot_boot_is_detected(self) -> None:
         with patch.object(

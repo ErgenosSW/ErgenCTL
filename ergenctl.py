@@ -81,6 +81,14 @@ class ResumeReport:
 
 
 @dataclass(frozen=True)
+class UpdateVerificationReport:
+    state: str
+    success: bool
+    reboot_required: bool
+    checks: list[Check]
+
+
+@dataclass(frozen=True)
 class RepairStep:
     id: str
     title: str
@@ -832,6 +840,148 @@ def failed_units_check() -> Check:
             ", ".join(units),
         )
     return Check("failed-units", "Failed systemd units", "pass", "none")
+
+
+def snapshot_pair_check(entries: list[dict[str, object]]) -> Check:
+    title = "Update snapshots"
+    posts = sorted(
+        (entry for entry in entries if entry.get("type") == "post"),
+        key=lambda entry: int(entry.get("number", 0)),
+        reverse=True,
+    )
+    if not posts:
+        return Check("update-snapshots", title, "warning", "no post-update snapshot found")
+
+    post = posts[0]
+    pre_number = str(post.get("pre_number") or "")
+    pre = next(
+        (
+            entry
+            for entry in entries
+            if entry.get("type") == "pre" and str(entry.get("number")) == pre_number
+        ),
+        None,
+    )
+    if pre is None:
+        return Check(
+            "update-snapshots",
+            title,
+            "warning",
+            f"post snapshot #{post['number']} has no matching pre snapshot",
+            f"pre_number={pre_number or 'missing'}",
+        )
+
+    descriptions = "; ".join(
+        str(entry.get("description") or "").strip() for entry in (pre, post)
+    ).strip("; ")
+    return Check(
+        "update-snapshots",
+        title,
+        "pass",
+        f"pre #{pre['number']} / post #{post['number']}",
+        descriptions or None,
+    )
+
+
+def kernel_restart_check(
+    running_kernel: str | None = None,
+    modules_root: Path = Path("/usr/lib/modules"),
+) -> tuple[Check, bool]:
+    running = running_kernel or platform.release()
+    if (modules_root / running).is_dir():
+        return Check("kernel-restart", "Kernel restart", "pass", "running kernel is current"), False
+    return (
+        Check(
+            "kernel-restart",
+            "Kernel restart",
+            "pass",
+            "restart required to load the installed kernel",
+            f"running={running}",
+        ),
+        True,
+    )
+
+
+def nvidia_kernel_modules_check(
+    pci_output: str | None = None,
+    kernel_versions: list[str] | None = None,
+) -> Check:
+    title = "NVIDIA kernel modules"
+    if pci_output is None:
+        if not shutil.which("lspci"):
+            return Check("nvidia-modules", title, "unknown", "pciutils is unavailable")
+        code, pci_output, error = run(["lspci", "-D"])
+        if code != 0:
+            return Check("nvidia-modules", title, "unknown", "could not inspect hardware", error or None)
+    if "nvidia" not in pci_output.casefold():
+        return Check("nvidia-modules", title, "skipped", "NVIDIA hardware not detected")
+    if not shutil.which("modinfo"):
+        return Check("nvidia-modules", title, "unknown", "modinfo is unavailable")
+
+    versions = kernel_versions
+    if versions is None:
+        try:
+            versions = sorted(path.name for path in Path("/usr/lib/modules").iterdir() if path.is_dir())
+        except OSError as error:
+            return Check("nvidia-modules", title, "fail", "could not inspect installed kernels", str(error))
+    if not versions:
+        return Check("nvidia-modules", title, "fail", "no installed kernel module trees found")
+
+    missing: list[str] = []
+    for version in versions:
+        code, _output, _error = run(["modinfo", "-k", version, "nvidia"])
+        if code != 0:
+            missing.append(version)
+    if missing:
+        return Check(
+            "nvidia-modules",
+            title,
+            "fail",
+            f"module missing for {len(missing)} installed kernel(s)",
+            ", ".join(missing),
+        )
+    return Check("nvidia-modules", title, "pass", f"available for {len(versions)} installed kernel(s)")
+
+
+def collect_update_verification() -> UpdateVerificationReport:
+    root_fstype = root_filesystem_type()
+    checks = [pacman_hooks_check(root_fstype)]
+    if root_fstype == "btrfs":
+        snapshots, snapshot_failed = collect_snapshot_report()
+        if snapshot_failed:
+            checks.append(
+                Check(
+                    "update-snapshots",
+                    "Update snapshots",
+                    "warning",
+                    snapshots.message or "could not inspect snapshots",
+                )
+            )
+        else:
+            checks.append(snapshot_pair_check(snapshots.entries))
+
+    kernel_check, reboot_required = kernel_restart_check()
+    checks.extend(
+        [
+            kernel_check,
+            boot_files_check(),
+            grub_config_check(root_fstype),
+            nvidia_kernel_modules_check(),
+            secureboot_check(),
+            failed_units_check(),
+        ]
+    )
+    failed = any(check.status == "fail" for check in checks)
+    needs_attention = any(check.status in {"warning", "unknown"} for check in checks)
+    if failed:
+        state = "critical"
+    elif needs_attention:
+        state = "attention"
+    elif reboot_required:
+        state = "reboot-required"
+    else:
+        state = "healthy"
+    return UpdateVerificationReport(state, not failed, reboot_required, checks)
 
 
 def secureboot_check() -> Check:
@@ -2226,6 +2376,16 @@ def resume_payload(report: ResumeReport) -> dict[str, object]:
     }
 
 
+def update_verification_payload(report: UpdateVerificationReport) -> dict[str, object]:
+    return {
+        "schema_version": SCHEMA_VERSION,
+        "application": APP_NAME,
+        "version": VERSION,
+        "hostname": platform.node(),
+        "update_verification": asdict(report),
+    }
+
+
 def repair_payload(report: RepairReport) -> dict[str, object]:
     return {
         "schema_version": SCHEMA_VERSION,
@@ -2342,6 +2502,27 @@ def print_resume(report: ResumeReport) -> None:
             print(f"- {check.title}: {check.evidence}")
 
 
+def print_update_verification(report: UpdateVerificationReport) -> None:
+    print_header("Post-update verification")
+    print(f"State    {report.state}")
+    print(f"Restart  {'required' if report.reboot_required else 'not required'}\n")
+    title_width = max((len(check.title) for check in report.checks), default=0)
+    for check in report.checks:
+        label = f"[{STATUS_LABELS.get(check.status, '?'):4}]"
+        label = colorize(label, STATUS_COLORS.get(check.status, "0"))
+        print(f"{label} {check.title:<{title_width}}  {check.summary}")
+
+    details = [
+        check
+        for check in report.checks
+        if check.status in {"warning", "fail", "unknown"} and check.evidence
+    ]
+    if details:
+        print("\nDetails:")
+        for check in details:
+            print(f"- {check.title}: {check.evidence}")
+
+
 def print_repair(report: RepairReport) -> None:
     print_header("Repair plan" if report.dry_run else "Repair result")
     print(f"Target   {report.target}")
@@ -2445,6 +2626,12 @@ def build_parser() -> argparse.ArgumentParser:
     logs.add_argument("--json", action="store_true", dest="as_json", help="emit machine-readable JSON")
     resume = subparsers.add_parser("resume", help="inspect hibernation resume configuration")
     resume.add_argument("--json", action="store_true", dest="as_json", help="emit machine-readable JSON")
+    verify_update = subparsers.add_parser(
+        "verify-update", help="verify system health after a package update"
+    )
+    verify_update.add_argument(
+        "--json", action="store_true", dest="as_json", help="emit machine-readable JSON"
+    )
     fix = subparsers.add_parser("fix", help="repair selected ErgenOS components")
     fix.add_argument("target", choices=REPAIR_TARGETS, help="component to repair")
     fix.add_argument("--dry-run", action="store_true", help="show the repair plan without changing the system")
@@ -2510,6 +2697,13 @@ def main(argv: Sequence[str] | None = None) -> int:
         else:
             print_resume(report)
         return 1 if any(check.status == "fail" for check in report.checks) else 0
+    if args.command == "verify-update":
+        report = collect_update_verification()
+        if args.as_json:
+            print(json.dumps(update_verification_payload(report), indent=2, ensure_ascii=False))
+        else:
+            print_update_verification(report)
+        return 0 if report.success else 1
     if args.command == "fix":
         if not args.dry_run and not args.yes and not confirm_repair(args.target):
             print("Repair cancelled. No changes were made.")

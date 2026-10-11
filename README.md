@@ -37,6 +37,7 @@ When started from a snapshot, ErgenCTL mounts the real base installation and per
 - Current and previous boot journal inspection
 - Log filtering for resume, boot, audio and graphics problems
 - Laptop hybrid-GPU diagnostics covering kernel drivers, the default GPU, render-offload environment and PCI runtime power state through `switcheroo-control`
+- Post-update verification for Snapper pairs, boot files, GRUB, Secure Boot, kernel modules and failed services
 - Btrfs and Snapper snapshot inspection
 - Detection of normal, live and snapshot boot modes
 - Hibernation resume configuration checks
