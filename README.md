@@ -214,6 +214,9 @@ List snapshots and choose the required number:
 sudo ergenctl snapshots
 ```
 
+The commands below use snapshot `8` as an example. Replace it with the number
+from your snapshot list.
+
 Inspect the rollback plan:
 
 ```bash
@@ -282,7 +285,7 @@ install it through ErgenPac.
 5. Return to the page and select **Check status**. Nine separate checks show
    what is complete and whether Secure Boot is active.
 
-**THE MOK PASSWORD IS USED ONLY ONCE** — the password authorizes this enrollment in
+**THE MOK PASSWORD IS USED ONLY ONCE** - the password authorizes this enrollment in
 MokManager. It is not needed at subsequent boots or updates. Removing the MOK
 uses a new one-time authorization. The administrator password is separate
 and is handled only by the system authentication agent.
