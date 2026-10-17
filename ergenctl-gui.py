@@ -113,6 +113,8 @@ class ErgenCTLWindow(Adw.ApplicationWindow):
             transition_duration=220,
         )
         self.workspace.set_vexpand(True)
+        self.workspace.set_hhomogeneous(False)
+        self.workspace.set_vhomogeneous(False)
         repair_page.append(self.workspace)
 
         dashboard = Gtk.Grid(column_spacing=18, row_spacing=18)
@@ -197,13 +199,43 @@ class ErgenCTLWindow(Adw.ApplicationWindow):
         self.pages.add_titled_with_icon(self.secureboot_page, "secureboot", "Secure Boot", "security-high-symbolic")
         self.pages.set_visible_child_name("repair")
 
+        self.set_size_request(360, 240)
+        compact = Adw.Breakpoint.new(Adw.BreakpointCondition.parse("max-width: 850sp"))
+        def reflow(narrow):
+            secureboot_content = self.secureboot_page.get_child()
+            while not isinstance(secureboot_content, Gtk.Box):
+                secureboot_content = secureboot_content.get_child()
+            secureboot_content.set_margin_start(12 if narrow else 24)
+            secureboot_content.set_margin_end(12 if narrow else 24)
+            dashboard.remove(diagnostics)
+            dashboard.remove(recovery)
+            dashboard.attach(diagnostics, 0, 0, 1 if narrow else 2, 1)
+            dashboard.attach(recovery, 0 if narrow else 2, 1 if narrow else 0, 1, 1)
+            (self.add_css_class if narrow else self.remove_css_class)("compact")
+        compact.connect("apply", lambda *_: reflow(True))
+        compact.connect("unapply", lambda *_: reflow(False))
+        self.add_breakpoint(compact)
+        phone = Adw.Breakpoint.new(Adw.BreakpointCondition.parse("max-width: 500sp"))
+        phone.add_setter(brand_name, "visible", False)
+        def reflow_cards(narrow):
+            cards = [diagnostic_grid.get_child_at(0, 0), diagnostic_grid.get_child_at(1, 0),
+                     diagnostic_grid.get_child_at(0, 1), diagnostic_grid.get_child_at(1, 1)] if narrow else self._compact_cards
+            self._compact_cards = cards
+            for card in cards:
+                diagnostic_grid.remove(card)
+            for index, card in enumerate(cards):
+                diagnostic_grid.attach(card, 0 if narrow else index % 2, index if narrow else index // 2, 1, 1)
+        phone.connect("apply", lambda *_: (reflow(True), reflow_cards(True)))
+        phone.connect("unapply", lambda *_: (reflow_cards(False), reflow(False)))
+        self.add_breakpoint(phone)
+
     @staticmethod
     def _panel_heading(eyebrow: str, title: str) -> Gtk.Widget:
         box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=3)
         kicker = Gtk.Label(label=eyebrow, xalign=0)
         kicker.add_css_class("ergen-eyebrow")
         box.append(kicker)
-        heading = Gtk.Label(label=title, xalign=0)
+        heading = Gtk.Label(label=title, xalign=0, wrap=True)
         heading.add_css_class("ergen-panel-title")
         box.append(heading)
         return box
@@ -223,7 +255,7 @@ class ErgenCTLWindow(Adw.ApplicationWindow):
         image.set_halign(Gtk.Align.START)
         image.add_css_class("ergen-card-icon")
         box.append(image)
-        label = Gtk.Label(label=title, xalign=0)
+        label = Gtk.Label(label=title, xalign=0, wrap=True)
         label.add_css_class("ergen-card-title")
         box.append(label)
         detail = Gtk.Label(label=subtitle, xalign=0, wrap=True)
@@ -242,7 +274,7 @@ class ErgenCTLWindow(Adw.ApplicationWindow):
         row.append(image)
         labels = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
         labels.set_hexpand(True)
-        labels.append(Gtk.Label(label=title, xalign=0))
+        labels.append(Gtk.Label(label=title, xalign=0, wrap=True))
         detail = Gtk.Label(label=subtitle, xalign=0, wrap=True)
         detail.add_css_class("ergen-muted")
         labels.append(detail)
@@ -265,6 +297,16 @@ class ErgenCTLWindow(Adw.ApplicationWindow):
         Adw.StyleManager.get_default().set_color_scheme(Adw.ColorScheme.PREFER_DARK)
         provider = Gtk.CssProvider()
         provider.load_from_data(b"""
+          .compact .ergen-dashboard { padding: 12px; }
+          .compact .ergen-command-hero { padding: 18px; border-radius: 18px; }
+          .compact .ergen-display { font-size: 25px; }
+          .compact .ergen-panel { padding: 14px; }
+          .compact .ergen-command-card { min-height: 90px; padding: 12px; }
+          .compact .ergen-topnav-button { min-width: 0; padding: 4px 8px; }
+          .compact .ergen-topnav { padding: 2px; }
+          .compact .ergen-results-panel { padding: 12px; }
+          .compact .secureboot-hero { padding: 16px; }
+
           window.ergen-shell {
             background: linear-gradient(145deg, #030a14, #071525);
             color: #eaf3ff;
