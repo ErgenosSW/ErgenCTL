@@ -124,5 +124,36 @@ page.report.update(state='degraded', problems=['GRUB signature is missing'], gru
 page.render_status()
 page.update_buttons()
 assert page.next_action == 'refresh'
+window.pages.set_visible_child_name('repair')
+window.gaming_button.emit('clicked')
+assert window.workspace.get_visible_child_name() == 'results'
+loop = GLib.MainLoop()
+timed_out = []
+def poll_gaming():
+    if not window.operation_busy:
+        loop.quit()
+        return False
+    return True
+def gaming_timeout():
+    timed_out.append(True)
+    loop.quit()
+    return False
+poll_source = GLib.timeout_add(50, poll_gaming)
+timeout_source = GLib.timeout_add_seconds(45, gaming_timeout)
+loop.run()
+assert not timed_out, 'Gaming Check did not finish'
+GLib.source_remove(timeout_source)
+assert window.result_heading.get_label() == 'Gaming Check'
+assert 'not checked' in window.result_summary.get_label()
+report_text = window.raw_output.get_buffer()
+report_text = report_text.get_text(report_text.get_start_iter(), report_text.get_end_iter(), False)
+assert 'gaming-game-gpu' in report_text
+assert 'gaming-vulkan' in report_text
+assert window.results.get_first_child() is not None
+capture('gaming-check.png')
+window._show_dashboard()
+settle()
+assert window.workspace.get_visible_child_name() == 'dashboard'
+capture('gaming-dashboard.png')
 window.destroy()
-print('GTK smoke passed: tabs, checklist, guided steps, maintenance, MOK warning, validation and cancellation.')
+print('GTK smoke passed: Secure Boot, Gaming Check button, local backend, report and dashboard navigation.')

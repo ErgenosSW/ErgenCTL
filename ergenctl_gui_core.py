@@ -27,6 +27,7 @@ class GuiCommand:
 
 
 COMMANDS = {
+    "gaming-check": GuiCommand("Gaming Check", ("gaming-check", "--json")),
     "doctor": GuiCommand("System check", ("doctor", "--json")),
     "snapshots": GuiCommand("Snapshots", ("snapshots", "--json"), True),
     "resume": GuiCommand("Hibernation", ("resume", "--json")),

@@ -16,7 +16,7 @@ gi.require_version("Adw", "1")
 from gi.repository import Adw, Gio, GLib, Gtk  # noqa: E402
 
 installed_module_directory = Path("/usr/lib/ergenctl")
-if installed_module_directory.is_dir():
+if not Path(__file__).with_name("ergenctl_gui_core.py").is_file() and installed_module_directory.is_dir():
     sys.path.insert(0, str(installed_module_directory))
 
 from ergenctl_gui_core import (
@@ -131,6 +131,9 @@ class ErgenCTLWindow(Adw.ApplicationWindow):
         logs_card.connect("clicked", self._show_logs_dialog)
         diagnostic_grid.attach(logs_card, 1, 1, 1, 1)
         diagnostics.append(diagnostic_grid)
+        self.gaming_button = self._wide_action("Gaming Check", "Offline graphics and gaming diagnostics", "input-gaming-symbolic")
+        self.gaming_button.connect("clicked", lambda _button: self._run(COMMANDS["gaming-check"]))
+        diagnostics.append(self.gaming_button)
         dashboard.attach(diagnostics, 0, 0, 2, 1)
 
         recovery = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12)
@@ -620,7 +623,10 @@ class ErgenCTLWindow(Adw.ApplicationWindow):
         self.set_operation_busy(True)
         installed = shutil.which("ergenctl")
         executable: str | tuple[str, str]
-        if installed:
+        local_backend = Path(__file__).resolve().with_name("ergenctl.py")
+        if local_backend.is_file():
+            executable = (sys.executable, str(local_backend))
+        elif installed:
             executable = installed
         else:
             executable = (sys.executable, str(Path(__file__).resolve().with_name("ergenctl.py")))
@@ -685,7 +691,7 @@ class ErgenCTLWindow(Adw.ApplicationWindow):
         if checks is None:
             checks = payload.get("resume_report", {}).get("checks")
         if checks:
-            counts = {status: sum(check["status"] == status for check in checks) for status in ("pass", "warning", "fail", "skipped")}
+            counts = {status: sum(check["status"] == status for check in checks) for status in ("pass", "warning", "fail", "skipped", "unknown")}
             summary = [f'{counts["pass"]} passed']
             if counts["warning"]:
                 summary.append(f'{counts["warning"]} warning(s)')
@@ -693,10 +699,13 @@ class ErgenCTLWindow(Adw.ApplicationWindow):
                 summary.append(f'{counts["fail"]} failed')
             if counts["skipped"]:
                 summary.append(f'{counts["skipped"]} skipped')
+            if counts["unknown"]:
+                summary.append(f'{counts["unknown"]} not checked')
             self.result_summary.set_label(", ".join(summary))
             ordered = sorted(checks, key=lambda check: {"fail": 0, "warning": 1, "pass": 2, "skipped": 3}.get(check["status"], 4))
             for check in ordered:
-                self._append_result(check["title"], check["summary"], check["status"])
+                evidence = check.get("evidence") if command is COMMANDS["gaming-check"] else None
+                self._append_result(check["title"], check["summary"], check["status"], evidence)
             if command is COMMANDS["doctor"]:
                 self.repair_plan_ready = False
                 self.repair_button.set_sensitive(False)
@@ -839,14 +848,24 @@ class ErgenCTLWindow(Adw.ApplicationWindow):
         row.add_prefix(badge)
         self.results.append(row)
 
-    def _append_result(self, title: str, summary: str, status: str) -> None:
+    def _append_result(self, title: str, summary: str, status: str, evidence: str | None = None) -> None:
         labels = {
             "pass": "OK",
             "warning": "!",
             "fail": "X",
             "skipped": "-",
+            "unknown": "?",
         }
-        row = Adw.ActionRow(title=title, subtitle=summary)
+        row = Adw.ExpanderRow(title=title, subtitle=summary) if evidence else Adw.ActionRow(title=title, subtitle=summary)
+        row.set_use_markup(False)
+        if evidence:
+            details = Gtk.Label(label=evidence, xalign=0, wrap=True, selectable=True)
+            details.set_margin_start(16)
+            details.set_margin_end(16)
+            details.set_margin_top(12)
+            details.set_margin_bottom(12)
+            details.add_css_class("dim-label")
+            row.add_row(details)
         icon = Gtk.Label(label=labels.get(status, "?"), width_chars=2)
         if status == "pass":
             icon.add_css_class("success")

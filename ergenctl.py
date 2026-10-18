@@ -359,6 +359,9 @@ def parse_graphics_device_details(pci_output: str) -> list[GraphicsDevice]:
     )
     current: GraphicsDevice | None = None
     for line in pci_output.splitlines():
+        # A new PCI function ends the previous GPU block, including audio/USB functions.
+        if re.match(r"^(?:[0-9a-fA-F]{4}:)?[0-9a-fA-F]{2}:[0-9a-fA-F]{2}\.[0-7]\s", line):
+            current = None
         match = pattern.match(line.strip())
         if match:
             current = GraphicsDevice(match.group(1), match.group(2).strip())
@@ -546,6 +549,154 @@ def hybrid_graphics_check(
         f"dual-GPU ready; default: {default_name}; offload: {offload_name}",
         "; ".join(switcheroo_evidence),
     )
+
+
+def gaming_vulkan_check() -> Check:
+    if not shutil.which("vulkaninfo"):
+        return Check("gaming-vulkan", "Vulkan runtime", "unknown",
+                     "Not tested: vulkaninfo is unavailable",
+                     "Install optional vulkan-tools to run a host Vulkan probe. No network is needed for the probe.")
+    code, output, error = run(["vulkaninfo", "--summary"])
+    if code != 0:
+        return Check("gaming-vulkan", "Vulkan runtime", "fail",
+                     "Host Vulkan probe failed", (error or output or "No diagnostic output")[:2000])
+    # Associate the type with each device; a software renderer alone is not gaming-ready.
+    devices = []
+    hardware = []
+    for block in re.split(r"(?=^GPU\d+:)", output, flags=re.MULTILINE):
+        name = re.search(r"^\s*deviceName\s*=\s*(.+)$", block, re.MULTILINE)
+        kind = re.search(r"^\s*deviceType\s*=\s*(.+)$", block, re.MULTILINE)
+        if name:
+            label = name.group(1).strip()
+            devices.append(label)
+            if kind and any(value in kind.group(1) for value in ("INTEGRATED_GPU", "DISCRETE_GPU", "VIRTUAL_GPU")):
+                hardware.append(label)
+    if not devices:
+        return Check("gaming-vulkan", "Vulkan runtime", "unknown",
+                     "Vulkan probe returned no recognizable devices", (error or output)[:2000])
+    if not hardware:
+        return Check("gaming-vulkan", "Vulkan runtime", "warning",
+                     "No hardware Vulkan device confirmed", "; ".join(devices))
+    return Check("gaming-vulkan", "Vulkan runtime", "pass",
+                 "Host Vulkan enumerated: " + "; ".join(hardware),
+                 "Enumeration does not test game rendering, 32-bit Vulkan or Flatpak runtimes.")
+
+
+def gaming_library_checks(packages: dict[str, str] | None, devices: list[GraphicsDevice]) -> list[Check]:
+    if packages is None:
+        return [Check("gaming-libraries", "Host graphics libraries", "unknown",
+                      "Could not read the installed Pacman package database")]
+    requirements = {"64-bit": ["vulkan-icd-loader"], "32-bit": ["lib32-vulkan-icd-loader"]}
+    for device in devices:
+        driver = device.driver
+        provider = {"amdgpu": "vulkan-radeon", "i915": "vulkan-intel", "xe": "vulkan-intel",
+                    "nvidia": "nvidia-utils", "nouveau": "vulkan-nouveau"}.get(driver)
+        if provider:
+            requirements["64-bit"].append(provider)
+            requirements["32-bit"].append("lib32-" + provider)
+            if driver != "nvidia":
+                requirements["64-bit"].append("mesa")
+                requirements["32-bit"].append("lib32-mesa")
+    checks = []
+    for bits, names in requirements.items():
+        names = list(dict.fromkeys(names))
+        missing = [name for name in names if name not in packages]
+        checks.append(Check(
+            "gaming-libraries-" + bits, bits + " host graphics libraries",
+            "warning" if missing else "pass",
+            "Missing standard packages: " + ", ".join(missing) if missing else "Standard packages installed",
+            "; ".join(f"{name} {packages[name]}" for name in names if name in packages)
+            + ". Package inventory only; alternative providers may exist. Flatpak uses its own libraries; "
+              "modern WoW is 64-bit, while other games/runners may need 32-bit support."
+        ))
+    if not devices or any(device.driver not in {"amdgpu", "i915", "xe", "nvidia", "nouveau"} for device in devices):
+        checks.append(Check("gaming-driver-packages", "GPU library mapping", "unknown",
+                            "Could not identify standard Vulkan packages for every GPU",
+                            "The library checks above only cover recognized active drivers and the Vulkan loader."))
+    return checks
+
+
+def gaming_runtime_check(home: Path) -> Check:
+    roots = [home / ".local/share/Steam/compatibilitytools.d",
+             home / ".steam/root/compatibilitytools.d",
+             home / ".local/share/umu/compatibilitytools",
+             home / ".var/app/io.github.Faugus.faugus-launcher/data/Steam/compatibilitytools.d",
+             home / ".var/app/io.github.Faugus.faugus-launcher/data/umu/compatibilitytools",
+             home / ".var/app/com.valvesoftware.Steam/data/Steam/compatibilitytools.d"]
+    found: dict[Path, str] = {}
+    unreadable = False
+    for root in roots:
+        try:
+            if not root.exists():
+                continue
+            for child in sorted(root.iterdir()):
+                if child.is_dir() and (child / "proton").is_file():
+                    found[child.resolve()] = child.name
+        except OSError:
+            unreadable = True
+    if found:
+        return Check("gaming-runners", "Custom Proton runners", "pass",
+                     ", ".join(found.values()),
+                     "Directory labels only; runner versions and the runner selected for WoW were not verified."
+                     + (" Some directories could not be read." if unreadable else ""))
+    return Check("gaming-runners", "Custom Proton runners", "unknown",
+                 "No custom Proton runner confirmed in common locations",
+                 "Launchers may store runners elsewhere. No runner was started and no Wine prefix was modified.")
+
+
+def collect_gaming_checks(home: Path | None = None) -> list[Check]:
+    """Offline, unprivileged diagnostics; never start a game, runner or updater."""
+    packages = None
+    if shutil.which("pacman"):
+        code, output, _error = run(["pacman", "-Q"])
+        if code == 0:
+            packages = dict(line.split(" ", 1) for line in output.splitlines() if " " in line)
+    devices = []
+    if shutil.which("lspci"):
+        code, output, _error = run(["lspci", "-Dk"])
+        if code == 0:
+            devices = parse_graphics_device_details(output)
+    checks = [Check("gaming-scope", "Offline diagnostics", "pass",
+                    "Local checks only; no downloads or system changes",
+                    "This report does not measure FPS, latency or server connectivity."),
+              gaming_vulkan_check()]
+    checks.extend(gaming_library_checks(packages, devices))
+    checks.append(hybrid_graphics_check())
+    flatpak_apps = None
+    if shutil.which("flatpak"):
+        code, output, _error = run(["flatpak", "list", "--app", "--columns=application,version"])
+        if code == 0:
+            flatpak_apps = dict((parts[0], parts[1] if len(parts) > 1 else "")
+                                for line in output.splitlines() if (parts := line.split("\t", 1)))
+    launchers = []
+    for native, app_id, title in (
+        ("steam", "com.valvesoftware.Steam", "Steam"),
+        ("lutris", "net.lutris.Lutris", "Lutris"),
+        ("heroic-games-launcher", "com.heroicgameslauncher.hgl", "Heroic"),
+        ("faugus-launcher", "io.github.Faugus.faugus-launcher", "Faugus"),
+    ):
+        if packages is not None and native in packages:
+            launchers.append(f"{title} (native {packages[native]})")
+        if flatpak_apps is not None and app_id in flatpak_apps:
+            launchers.append(f"{title} (Flatpak {flatpak_apps[app_id]})")
+    checks.append(Check("gaming-launchers", "Gaming launchers", "pass" if launchers else "unknown",
+                        "; ".join(launchers) if launchers else "No launcher confirmed in the local package inventory",
+                        "Flatpak graphics extensions and per-game settings are not validated by host package checks."))
+    checks.append(gaming_runtime_check(home if home is not None else Path.home()))
+    if packages is not None:
+        wine = [f"{name} {packages[name]}" for name in ("wine", "wine-staging", "umu-launcher") if name in packages]
+        checks.append(Check("gaming-wine", "Native Wine / UMU", "pass" if wine else "skipped",
+                            "; ".join(wine) if wine else "Not installed as native packages; launchers may bundle their own runners"))
+        for name, title in (("gamemode", "GameMode"), ("mangohud", "MangoHud"), ("gamescope", "Gamescope")):
+            checks.append(Check("gaming-" + name, title + " (optional)", "pass" if name in packages else "skipped",
+                                f"Installed: {packages[name]}; activation in games not checked" if name in packages
+                                else "Not installed on the host; optional for playing WoW",
+                                "Host installation does not configure the Flatpak version of this tool."))
+    checks.append(Check("gaming-game-gpu", "WoW rendering GPU", "unknown",
+                        "Not checked: requires a running game and renderer evidence",
+                        "A configured offload GPU or installed driver does not prove which GPU WoW uses. "
+                        "Check the in-game graphics adapter or a renderer overlay during a later game session."))
+    return checks
 
 
 def root_check() -> Check:
@@ -2605,6 +2756,8 @@ def build_parser() -> argparse.ArgumentParser:
     status.add_argument("--json", action="store_true", dest="as_json", help="emit machine-readable JSON")
     doctor = subparsers.add_parser("doctor", help="run extended read-only ErgenOS diagnostics")
     doctor.add_argument("--json", action="store_true", dest="as_json", help="emit machine-readable JSON")
+    gaming = subparsers.add_parser("gaming-check", help="run offline, read-only gaming diagnostics")
+    gaming.add_argument("--json", action="store_true", dest="as_json", help="emit machine-readable JSON")
     snapshots = subparsers.add_parser("snapshots", help="list Snapper snapshots without modifying them")
     snapshots.add_argument("--json", action="store_true", dest="as_json", help="emit machine-readable JSON")
     logs = subparsers.add_parser("logs", help="show errors from the system boot journal")
@@ -2675,6 +2828,17 @@ def main(argv: Sequence[str] | None = None) -> int:
             print(json.dumps(status_payload(checks), indent=2, ensure_ascii=False))
         else:
             print_doctor(checks)
+        return 1 if any(check.status == "fail" for check in checks) else 0
+    if args.command == "gaming-check":
+        checks = collect_gaming_checks()
+        if args.as_json:
+            print(json.dumps(status_payload(checks), indent=2, ensure_ascii=False))
+        else:
+            print_header("Gaming Check")
+            for check in checks:
+                print(f"[{STATUS_LABELS.get(check.status, '?')}] {check.title}: {check.summary}")
+                if check.evidence:
+                    print(f"  {check.evidence}")
         return 1 if any(check.status == "fail" for check in checks) else 0
     if args.command == "snapshots":
         report, failed = collect_snapshot_report()

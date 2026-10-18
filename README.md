@@ -39,7 +39,33 @@ See [CHANGELOG.md](CHANGELOG.md).
 
 `ergenctl verify-update --json` is the diagnostics backend called by ErgenPac;
 it does not replace Pacman or create an additional set of update snapshots.
-Gaming Check was deferred to 1.3 and is not an available command.
+The development source also includes the offline Gaming Check described below.
+The previously released 1.2 package does not include this new command.
+
+## Gaming Check (development)
+
+Open **Gaming Check** on the application dashboard, or run:
+
+```bash
+ergenctl gaming-check
+ergenctl gaming-check --json
+```
+
+The report runs without administrator privileges or network access. It checks
+host Vulkan enumeration (when optional `vulkan-tools` is installed), standard
+64-bit and 32-bit graphics packages for recognized active GPU drivers, existing
+hybrid GPU diagnostics, native/Flatpak launcher versions and custom Proton runner
+directories. GameMode, MangoHud and Gamescope are optional; their absence is
+shown as skipped. Nothing is installed, no runner or game is launched and no
+Wine prefix is modified.
+
+Missing probes or unavailable information are explicitly marked unknown.
+Exit status is 1 only when a check fails, otherwise 0; warnings and unknown
+checks do not certify gaming readiness. Host packages do not validate Flatpak
+graphics extensions. Runner directory names do not verify the selected runner
+or its version. The report does not test FPS, connectivity, actual game rendering
+or which GPU a running WoW session uses. Modern WoW is 64-bit; 32-bit libraries
+are relevant to other games and some runner configurations.
 
 ## Current capabilities
 
