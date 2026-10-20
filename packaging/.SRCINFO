@@ -1,7 +1,7 @@
 pkgbase = ergenctl
 	pkgdesc = Diagnostics and recovery utility for ErgenOS
 	pkgver = 1.1.0.dev
-	pkgrel = 9
+	pkgrel = 10
 	url = https://github.com/ErgenosSW/ErgenCTL
 	arch = any
 	license = GPL-3.0-or-later
