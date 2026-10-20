@@ -822,6 +822,7 @@ class RepairTests(unittest.TestCase):
             with (
                 patch.object(ergenctl, "live_environment_detected", return_value=False),
                 patch.object(ergenctl.os, "geteuid", return_value=0),
+                patch.object(ergenctl.Path, "is_file", return_value=True),
             ):
                 error = ergenctl.repair_preflight(ergenctl.selected_repair_steps("repositories"), True, environment)
 
