@@ -27,10 +27,11 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          source packaging/PKGBUILD
-          expected="v${pkgver}-${pkgrel}"
-          [[ "$GITHUB_REF_NAME" == "$expected" ]] || {
-            echo "Tag $GITHUB_REF_NAME does not match $expected" >&2
+          release=${GITHUB_REF_NAME#v}
+          release_pkgver=${release%-*}
+          release_pkgrel=${release##*-}
+          [[ "$GITHUB_REF_NAME" == v* && "$release_pkgver" =~ ^[0-9A-Za-z._+]+$ && "$release_pkgrel" =~ ^[1-9][0-9]*$ ]] || {
+            echo "Expected a tag such as v1.1.0.dev-12" >&2
             exit 1
           }
       - name: Check Python syntax
@@ -66,6 +67,17 @@ jobs:
           echo 'builder ALL=(ALL) NOPASSWD: /usr/bin/pacman' > /etc/sudoers.d/builder
           chmod 0440 /etc/sudoers.d/builder
           chown -R builder:builder "$GITHUB_WORKSPACE"
+      - name: Apply version from release tag
+        shell: bash
+        run: |
+          set -euo pipefail
+          release=${GITHUB_REF_NAME#v}
+          release_pkgver=${release%-*}
+          release_pkgrel=${release##*-}
+          sed -i \
+            -e "s/^pkgver=.*/pkgver=${release_pkgver}/" \
+            -e "s/^pkgrel=.*/pkgrel=${release_pkgrel}/" \
+            packaging/PKGBUILD
       - name: Prepare tagged source archive
         shell: bash
         run: |

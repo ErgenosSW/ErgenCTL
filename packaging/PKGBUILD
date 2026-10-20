@@ -31,7 +31,7 @@ optdepends=(
   'flatpak: Flathub diagnostics'
   'snap-pac: automatic snapshots around Pacman transactions'
 )
-_upstream_version=1.1.0.dev
+_upstream_version=$pkgver
 # Local development snapshot shipped alongside this recipe; no unpublished tag URL.
 source=(
   "${pkgname}-${_upstream_version}.tar.gz"
