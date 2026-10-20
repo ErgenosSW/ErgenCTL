@@ -1,0 +1,33 @@
+pkgbase = ergenctl
+	pkgdesc = Diagnostics and recovery utility for ErgenOS
+	pkgver = 1.1.0.dev
+	pkgrel = 9
+	url = https://github.com/ErgenosSW/ErgenCTL
+	arch = any
+	license = GPL-3.0-or-later
+	makedepends = desktop-file-utils
+	depends = arch-install-scripts
+	depends = btrfs-progs
+	depends = grub
+	depends = grub-btrfs
+	depends = gtk4
+	depends = libadwaita
+	depends = mkinitcpio
+	depends = pacman
+	depends = pciutils
+	depends = polkit
+	depends = python
+	depends = python-gobject
+	depends = snapper
+	depends = systemd
+	depends = switcheroo-control
+	optdepends = ergenos-secureboot>=0.2.0.dev: Secure Boot configuration in the GUI
+	optdepends = ergenpac: install the optional Secure Boot backend graphically
+	optdepends = flatpak: Flathub diagnostics
+	optdepends = snap-pac: automatic snapshots around Pacman transactions
+	source = ergenctl-1.1.0.dev.tar.gz
+	source = ergenctl-logo.png
+	sha256sums = 18fd819697aa11d86a2c23aa820053da4cb6824ed695964a03d194c8e10f5f63
+	sha256sums = 275ae119ab874bef2c61540589ed24902a6234d9b3c5f17147a96bfa48d75701
+
+pkgname = ergenctl

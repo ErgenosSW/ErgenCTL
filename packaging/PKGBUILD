@@ -1,0 +1,62 @@
+# Maintainer: ErgenOS Project <https://github.com/ErgenosSW>
+
+pkgname=ergenctl
+pkgver=1.1.0.dev
+pkgrel=9
+pkgdesc='Diagnostics and recovery utility for ErgenOS'
+arch=('any')
+url='https://github.com/ErgenosSW/ErgenCTL'
+license=('GPL-3.0-or-later')
+depends=(
+  'arch-install-scripts'
+  'btrfs-progs'
+  'grub'
+  'grub-btrfs'
+  'gtk4'
+  'libadwaita'
+  'mkinitcpio'
+  'pacman'
+  'pciutils'
+  'polkit'
+  'python'
+  'python-gobject'
+  'snapper'
+  'systemd'
+  'switcheroo-control'
+)
+makedepends=('desktop-file-utils')
+optdepends=(
+  'ergenos-secureboot>=0.2.0.dev: Secure Boot configuration in the GUI'
+  'ergenpac: install the optional Secure Boot backend graphically'
+  'flatpak: Flathub diagnostics'
+  'snap-pac: automatic snapshots around Pacman transactions'
+)
+_upstream_version=1.1.0.dev
+# Local development snapshot shipped alongside this recipe; no unpublished tag URL.
+source=(
+  "${pkgname}-${_upstream_version}.tar.gz"
+  'ergenctl-logo.png'
+)
+sha256sums=('18fd819697aa11d86a2c23aa820053da4cb6824ed695964a03d194c8e10f5f63'
+            '275ae119ab874bef2c61540589ed24902a6234d9b3c5f17147a96bfa48d75701')
+
+check() {
+  cd "ErgenCTL-${_upstream_version}"
+  PYTHONDONTWRITEBYTECODE=1 python -m unittest discover -s tests -v
+  python -m py_compile ergenctl.py ergenctl-gui.py ergenctl_gui_core.py ergenctl_secureboot_core.py ergenctl_secureboot_gui.py
+  desktop-file-validate data/io.github.ergenossw.ErgenCTL.desktop
+}
+
+package() {
+  cd "ErgenCTL-${_upstream_version}"
+  install -Dm755 ergenctl.py "${pkgdir}/usr/bin/ergenctl"
+  install -Dm755 ergenctl-gui.py "${pkgdir}/usr/bin/ergenctl-gui"
+  install -Dm644 ergenctl_gui_core.py \
+    "${pkgdir}/usr/lib/ergenctl/ergenctl_gui_core.py"
+  install -Dm644 ergenctl_secureboot_core.py "${pkgdir}/usr/lib/ergenctl/ergenctl_secureboot_core.py"
+  install -Dm644 ergenctl_secureboot_gui.py "${pkgdir}/usr/lib/ergenctl/ergenctl_secureboot_gui.py"
+  install -Dm644 data/io.github.ergenossw.ErgenCTL.desktop \
+    "${pkgdir}/usr/share/applications/io.github.ergenossw.ErgenCTL.desktop"
+  install -Dm644 LICENSE "${pkgdir}/usr/share/licenses/${pkgname}/LICENSE"
+  install -Dm644 "${srcdir}/ergenctl-logo.png" "${pkgdir}/usr/share/pixmaps/ergenctl.png"
+}

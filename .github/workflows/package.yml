@@ -1,0 +1,103 @@
+name: Release package
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: package-${{ github.ref_name }}
+  cancel-in-progress: false
+
+jobs:
+  tests:
+    name: Regression tests
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout release tag
+        uses: actions/checkout@v6
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.13"
+      - name: Validate tag
+        shell: bash
+        run: |
+          set -euo pipefail
+          source packaging/PKGBUILD
+          expected="v${pkgver}-${pkgrel}"
+          [[ "$GITHUB_REF_NAME" == "$expected" ]] || {
+            echo "Tag $GITHUB_REF_NAME does not match $expected" >&2
+            exit 1
+          }
+      - name: Check Python syntax
+        run: |
+          python -m py_compile \
+            ergenctl.py \
+            ergenctl-gui.py \
+            ergenctl_gui_core.py \
+            ergenctl_secureboot_core.py \
+            ergenctl_secureboot_gui.py
+      - name: Run regression suite
+        env:
+          PYTHONDONTWRITEBYTECODE: "1"
+        run: python -m unittest discover -s tests -v
+
+  package:
+    name: Build Arch package
+    needs: tests
+    runs-on: ubuntu-latest
+    container:
+      image: archlinux:base-devel
+    steps:
+      - name: Install build tools
+        run: |
+          pacman -Syu --noconfirm
+          pacman -S --noconfirm desktop-file-utils git pacman-contrib python sudo
+      - name: Checkout release tag
+        uses: actions/checkout@v6
+      - name: Create build user
+        shell: bash
+        run: |
+          useradd --create-home builder
+          echo 'builder ALL=(ALL) NOPASSWD: /usr/bin/pacman' > /etc/sudoers.d/builder
+          chmod 0440 /etc/sudoers.d/builder
+          chown -R builder:builder "$GITHUB_WORKSPACE"
+      - name: Prepare tagged source archive
+        shell: bash
+        run: |
+          set -euo pipefail
+          source packaging/PKGBUILD
+          staging="$RUNNER_TEMP/ErgenCTL-${pkgver}"
+          mkdir -p "$staging"
+          tar \
+            --exclude=.git \
+            --exclude=.github \
+            --exclude=packaging \
+            --exclude='__pycache__' \
+            --exclude='*.pyc' \
+            -cf - . | tar -xf - -C "$staging"
+          tar -C "$RUNNER_TEMP" \
+            -czf "packaging/ergenctl-${pkgver}.tar.gz" \
+            "ErgenCTL-${pkgver}"
+          chown builder:builder "packaging/ergenctl-${pkgver}.tar.gz"
+      - name: Update temporary source checksum
+        working-directory: packaging
+        run: sudo -u builder updpkgsums
+      - name: Build unsigned package
+        working-directory: packaging
+        run: sudo -u builder makepkg --syncdeps --cleanbuild --noconfirm
+      - name: Inspect package
+        working-directory: packaging
+        run: |
+          pacman -Qip ./*.pkg.tar.zst
+          pacman -Qlp ./*.pkg.tar.zst
+      - name: Upload package artifact
+        uses: actions/upload-artifact@v6
+        with:
+          name: ergenctl-${{ github.ref_name }}-arch-package
+          path: packaging/*.pkg.tar.zst
+          if-no-files-found: error
