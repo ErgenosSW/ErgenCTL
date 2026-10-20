@@ -2,7 +2,7 @@
 
 pkgname=ergenctl
 pkgver=1.1.0.dev
-pkgrel=10
+pkgrel=11
 pkgdesc='Diagnostics and recovery utility for ErgenOS'
 arch=('any')
 url='https://github.com/ErgenosSW/ErgenCTL'

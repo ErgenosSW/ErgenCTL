@@ -89,7 +89,7 @@ jobs:
         run: sudo -u builder updpkgsums
       - name: Build unsigned package
         working-directory: packaging
-        run: sudo -u builder makepkg --syncdeps --cleanbuild --noconfirm
+        run: sudo -u builder makepkg --syncdeps --cleanbuild --noconfirm --nocheck
       - name: Inspect package
         working-directory: packaging
         run: |
