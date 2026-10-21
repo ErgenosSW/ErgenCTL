@@ -9,6 +9,7 @@
 </p>
 
 <p align="center">
+  <a href="https://github.com/ErgenosSW/ErgenCTL/actions/workflows/tests.yml"><img src="https://github.com/ErgenosSW/ErgenCTL/actions/workflows/tests.yml/badge.svg?branch=main" alt="Tests"></a>
   <a href="https://github.com/ErgenosSW/ErgenCTL/releases"><img src="https://img.shields.io/badge/release-v1.0.0-E36F3D" alt="Release v1.0.0"></a>
   <a href="https://github.com/ErgenosSW/ErgenCTL/blob/main/LICENSE"><img src="https://img.shields.io/badge/license-GPL--3.0--or--later-1682B4" alt="License GPL-3.0-or-later"></a>
 </p>
