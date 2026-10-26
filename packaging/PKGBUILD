@@ -1,4 +1,4 @@
-# Maintainer: ErgenOS Project <https://github.com/ErgenosSW>
+# Maintainer: Szymon Pilip <szymon.pilip@ergenos.dev>
 
 pkgname=ergenctl
 pkgver=1.1.0.dev
