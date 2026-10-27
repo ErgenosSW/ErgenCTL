@@ -2,114 +2,133 @@ name: Release package
 
 on:
   push:
-    tags:
-      - "v*"
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: Existing package tag, including pkgrel (for example v1.0.1-2)
+        required: true
+        type: string
 
 permissions:
   contents: read
 
 concurrency:
-  group: package-${{ github.ref_name }}
+  group: package-${{ inputs.release_tag || github.ref_name }}
   cancel-in-progress: false
+
+env:
+  RELEASE_TAG: ${{ inputs.release_tag || github.ref_name }}
 
 jobs:
   tests:
     name: Regression tests
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout release tag
-        uses: actions/checkout@v6
-      - name: Set up Python
-        uses: actions/setup-python@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
-          python-version: "3.13"
-      - name: Validate tag
-        shell: bash
-        run: |
-          set -euo pipefail
-          release=${GITHUB_REF_NAME#v}
-          release_pkgver=${release%-*}
-          release_pkgrel=${release##*-}
-          [[ "$GITHUB_REF_NAME" == v* && "$release_pkgver" =~ ^[0-9A-Za-z._+]+$ && "$release_pkgrel" =~ ^[1-9][0-9]*$ ]] || {
-            echo "Expected a tag such as v1.1.0.dev-12" >&2
-            exit 1
-          }
+          ref: ${{ env.RELEASE_TAG }}
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: '3.13'
+      - name: Validate package version
+        run: python .github/scripts/prepare-release.py validate "$RELEASE_TAG"
       - name: Check Python syntax
-        run: |
-          python -m py_compile \
-            ergenctl.py \
-            ergenctl-gui.py \
-            ergenctl_gui_core.py \
-            ergenctl_secureboot_core.py \
-            ergenctl_secureboot_gui.py
+        run: python -m compileall -q ergenctl.py ergenctl-gui.py ergenctl_gui_core.py ergenctl_secureboot_core.py ergenctl_secureboot_gui.py tests
       - name: Run regression suite
         env:
-          PYTHONDONTWRITEBYTECODE: "1"
+          PYTHONDONTWRITEBYTECODE: '1'
+          PYTHONPATH: src
         run: python -m unittest discover -s tests -v
 
   package:
-    name: Build Arch package
+    name: Build unsigned package for maintainer signing
     needs: tests
     runs-on: ubuntu-latest
     container:
       image: archlinux:base-devel
     steps:
       - name: Install build tools
-        run: |
-          pacman -Syu --noconfirm
-          pacman -S --noconfirm desktop-file-utils git pacman-contrib python sudo
-      - name: Checkout release tag
-        uses: actions/checkout@v6
-      - name: Create build user
+        run: pacman -Syu --noconfirm git pacman-contrib python sudo
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ env.RELEASE_TAG }}
+      - name: Configure signed ErgenOS build dependencies
         shell: bash
         run: |
-          useradd --create-home builder
-          echo 'builder ALL=(ALL) NOPASSWD: /usr/bin/pacman' > /etc/sudoers.d/builder
+          set -euo pipefail
+          curl --fail --location --retry 3 \
+            https://raw.githubusercontent.com/ErgenosSW/ErgenOS-Repo/main/keys/ergenos.asc \
+            --output /tmp/ergenos.asc
+          fingerprint=$(gpg --batch --show-keys --with-colons /tmp/ergenos.asc | awk -F: '$1 == "fpr" { print $10; exit }')
+          test "$fingerprint" = 28F9539131BC392DAF4099C595FE7988F432AFDA
+          pacman-key --init
+          pacman-key --add /tmp/ergenos.asc
+          pacman-key --lsign-key "$fingerprint"
+          printf '\n[ergenos]\nSigLevel = Required\nServer = https://ergenossw.github.io/ErgenOS-Repo/$arch\n' >> /etc/pacman.conf
+          pacman -Sy --noconfirm
+      - name: Create build user
+        run: |
+          useradd -m builder
+          printf 'builder ALL=(ALL) NOPASSWD: /usr/bin/pacman\n' > /etc/sudoers.d/builder
           chmod 0440 /etc/sudoers.d/builder
           chown -R builder:builder "$GITHUB_WORKSPACE"
-      - name: Apply version from release tag
+      - name: Prepare exact tagged source and validate checksums
+        run: sudo -u builder python .github/scripts/prepare-release.py prepare "$RELEASE_TAG"
+      - name: Build package
+        working-directory: packaging
+        run: sudo -u builder makepkg --syncdeps --cleanbuild --noconfirm --needed --nocheck
+      - name: Inspect and record package provenance
         shell: bash
         run: |
           set -euo pipefail
-          release=${GITHUB_REF_NAME#v}
-          release_pkgver=${release%-*}
-          release_pkgrel=${release##*-}
-          sed -i \
-            -e "s/^pkgver=.*/pkgver=${release_pkgver}/" \
-            -e "s/^pkgrel=.*/pkgrel=${release_pkgrel}/" \
-            packaging/PKGBUILD
-      - name: Prepare tagged source archive
-        shell: bash
-        run: |
-          set -euo pipefail
-          source packaging/PKGBUILD
-          staging="$RUNNER_TEMP/ErgenCTL-${pkgver}"
-          mkdir -p "$staging"
-          tar \
-            --exclude=.git \
-            --exclude=.github \
-            --exclude=packaging \
-            --exclude='__pycache__' \
-            --exclude='*.pyc' \
-            -cf - . | tar -xf - -C "$staging"
-          tar -C "$RUNNER_TEMP" \
-            -czf "packaging/ergenctl-${pkgver}.tar.gz" \
-            "ErgenCTL-${pkgver}"
-          chown builder:builder "packaging/ergenctl-${pkgver}.tar.gz"
-      - name: Update temporary source checksum
-        working-directory: packaging
-        run: sudo -u builder updpkgsums
-      - name: Build unsigned package
-        working-directory: packaging
-        run: sudo -u builder makepkg --syncdeps --cleanbuild --noconfirm --nocheck
-      - name: Inspect package
-        working-directory: packaging
-        run: |
-          pacman -Qip ./*.pkg.tar.zst
-          pacman -Qlp ./*.pkg.tar.zst
-      - name: Upload package artifact
-        uses: actions/upload-artifact@v6
+          mkdir artifacts
+          mapfile -t packages < <(find packaging -maxdepth 1 -type f -name '*.pkg.tar.zst' ! -name '*-debug-*')
+          test "${#packages[@]}" -eq 1
+          pacman -Qip "${packages[0]}"
+          cp "${packages[0]}" artifacts/
+          cp packaging/PKGBUILD packaging/.SRCINFO artifacts/
+          git rev-parse HEAD > artifacts/SOURCE-REVISION.txt
+          (cd artifacts && sha256sum *.pkg.tar.zst > SHA256SUMS)
+      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
         with:
-          name: ergenctl-${{ github.ref_name }}-arch-package
-          path: packaging/*.pkg.tar.zst
+          name: ergenctl-${{ env.RELEASE_TAG }}-unsigned
+          path: artifacts/
+          include-hidden-files: true
           if-no-files-found: error
+
+  draft:
+    name: Prepare draft release for maintainer review
+    needs: package
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ env.RELEASE_TAG }}
+      - name: Create draft without publishing unsigned packages
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if gh release view "$RELEASE_TAG" --json isDraft > release-state.json; then
+            test "$(jq -r .isDraft release-state.json)" = true || {
+              echo 'Release is already published; leave it unchanged.'
+              exit 0
+            }
+            echo 'Draft already exists; preserve maintainer edits.'
+            exit 0
+          fi
+          cp RELEASE-NOTES.md "$RUNNER_TEMP/release-notes.md"
+          printf '\nBuild: %s\n\nUnsigned build artifacts are retained in Actions. Attach maintainer-signed packages and signatures before publication.\n' "$RUN_URL" >> "$RUNNER_TEMP/release-notes.md"
+          flags=(--draft --verify-tag --latest=false)
+          if [[ "$RELEASE_TAG" == *dev* || "$RELEASE_TAG" == *alpha* || "$RELEASE_TAG" == *beta* || "$RELEASE_TAG" == *rc* ]]; then
+            flags+=(--prerelease)
+          fi
+          gh release create "$RELEASE_TAG" "${flags[@]}" \
+            --title "ErgenCTL ${RELEASE_TAG#v}" \
+            --notes-file "$RUNNER_TEMP/release-notes.md"
