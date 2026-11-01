@@ -925,6 +925,11 @@ class RepairTests(unittest.TestCase):
     def test_all_repair_executes_only_needed_steps(self) -> None:
         needed = [ergenctl.REPAIR_STEPS["repositories"], ergenctl.REPAIR_STEPS["resume"]]
         with (
+            patch.object(
+                ergenctl,
+                "prepare_repair_environment",
+                return_value=(ergenctl.RepairEnvironment(), None),
+            ),
             patch.object(ergenctl, "needed_repair_steps", return_value=needed),
             patch.object(ergenctl, "repair_preflight", return_value=None),
         ):
@@ -937,6 +942,11 @@ class RepairTests(unittest.TestCase):
 
     def test_dry_run_does_not_execute_commands(self) -> None:
         with (
+            patch.object(
+                ergenctl,
+                "prepare_repair_environment",
+                return_value=(ergenctl.RepairEnvironment(), None),
+            ),
             patch.object(ergenctl, "repair_preflight", return_value=None),
             patch.object(ergenctl, "run_repair_command") as run_mock,
             patch.object(ergenctl, "run_internal_repair") as action_mock,
@@ -953,6 +963,11 @@ class RepairTests(unittest.TestCase):
 
     def test_internal_action_is_shown_but_not_run_in_dry_run(self) -> None:
         with (
+            patch.object(
+                ergenctl,
+                "prepare_repair_environment",
+                return_value=(ergenctl.RepairEnvironment(), None),
+            ),
             patch.object(ergenctl, "repair_preflight", return_value=None),
             patch.object(ergenctl, "run_internal_repair") as action_mock,
         ):
@@ -963,6 +978,11 @@ class RepairTests(unittest.TestCase):
 
     def test_repair_stops_after_internal_action_failure(self) -> None:
         with (
+            patch.object(
+                ergenctl,
+                "prepare_repair_environment",
+                return_value=(ergenctl.RepairEnvironment(), None),
+            ),
             patch.object(ergenctl, "repair_preflight", return_value=None),
             patch.object(ergenctl, "backup_configuration", return_value=None),
             patch.object(ergenctl, "run_internal_repair", return_value=(False, "bad config")),
@@ -978,6 +998,11 @@ class RepairTests(unittest.TestCase):
     def test_successful_repair_is_validated(self) -> None:
         validation = ergenctl.Check("services", "Services", "pass", "active")
         with (
+            patch.object(
+                ergenctl,
+                "prepare_repair_environment",
+                return_value=(ergenctl.RepairEnvironment(), None),
+            ),
             patch.object(ergenctl, "repair_preflight", return_value=None),
             patch.object(ergenctl, "backup_configuration", return_value="/backup"),
             patch.object(ergenctl, "run_repair_command", return_value=(0, "", "")) as run_mock,
@@ -992,6 +1017,11 @@ class RepairTests(unittest.TestCase):
 
     def test_repair_stops_after_command_failure(self) -> None:
         with (
+            patch.object(
+                ergenctl,
+                "prepare_repair_environment",
+                return_value=(ergenctl.RepairEnvironment(), None),
+            ),
             patch.object(ergenctl, "repair_preflight", return_value=None),
             patch.object(ergenctl, "backup_configuration", return_value=None),
             patch.object(ergenctl, "run_internal_repair", return_value=(True, "configured")),
